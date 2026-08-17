@@ -685,6 +685,21 @@ public class WorkstationController {
         return ApiResponse.ok(jdbc.queryForList("SELECT * FROM report_attachment WHERE report_id=?", reportId));
     }
 
+    /** 检验抽屉按所选报告展示指标明细，仍先校验报告所属住院记录的数据范围。 */
+    @GetMapping("/reports/{reportId}/results")
+    public ApiResponse<List<Map<String, Object>>> reportResults(@PathVariable long reportId) {
+        long admissionId = jdbc.queryForObject(
+                "SELECT eo.admission_id FROM exam_report r JOIN exam_order_item i ON i.exam_order_item_id=r.exam_order_item_id "
+                        + "JOIN exam_order eo ON eo.exam_order_id=i.exam_order_id WHERE r.report_id=?",
+                Long.class,
+                reportId);
+        service.requireReadAccess(admissionId, CurrentUser.get());
+        return ApiResponse.ok(jdbc.queryForList(
+                "SELECT r.*,CONCAT('LAB-',LPAD(r.result_id,6,'0')) AS result_code "
+                        + "FROM exam_result r WHERE r.report_id=? ORDER BY r.sort_no,r.result_id",
+                reportId));
+    }
+
     @PostMapping("/admissions/{admissionId}/exports")
     public ApiResponse<Map<String, Object>> requestExport(
             @PathVariable long admissionId,

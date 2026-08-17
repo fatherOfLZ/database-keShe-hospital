@@ -25,6 +25,25 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
   int? _admissionId;
   // 默认进入病案首页，确保移动端下拉菜单的初始值也属于左侧菜单项。
   String _selectedMenu = 'record_home';
+  bool _labPanelOpen = false;
+  double? _labPanelWidth;
+  bool _labInpatient = true;
+  bool _labCalendarOpen = false;
+  DateTime? _labSelectedDate;
+  String _labDateLabel = '选择日期';
+  String _labReportKeyword = '';
+  Future<List<Map<String, dynamic>>>? _labReportsFuture;
+  final Set<int> _selectedLabReportIds = <int>{};
+  int? _activeLabReportId;
+  final Set<int> _selectedLabResultIds = <int>{};
+  final Map<String, bool> _labDisplayOptions = {
+    '异常指标': false,
+    '日期': false,
+    '报告名称': true,
+    '换行': false,
+    '时分': false,
+    '全部显示': false,
+  };
   bool _loading = true;
   String _keyword = '';
 
@@ -115,7 +134,7 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
                   ? Row(
                       children: [
                         _clinicalSidebar(),
-                        Expanded(child: _workspace()),
+                        Expanded(child: _workspaceWithTools()),
                         _rightSidebar(),
                       ],
                     )
@@ -127,6 +146,33 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
                     ),
         ),
       ],
+    );
+  }
+
+  /// 中间工作区保持原尺寸，检验抽屉叠加在其右侧，避免改变左侧菜单和主页面布局。
+  Widget _workspaceWithTools() {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final maximum = constraints.maxWidth;
+        final initialWidth = maximum * 0.5;
+        final width = (_labPanelWidth ?? initialWidth)
+            .clamp(360.0, maximum - 120.0)
+            .toDouble();
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            _workspace(),
+            if (_labPanelOpen)
+              Positioned(
+                top: 0,
+                right: 0,
+                bottom: 0,
+                width: width,
+                child: _labPanel(width, maximum),
+              ),
+          ],
+        );
+      },
     );
   }
 
@@ -173,7 +219,15 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
                   .toList(),
               onChanged: (value) {
                 if (value != null) {
-                  setState(() => _admissionId = value);
+                  setState(() {
+                    _admissionId = value;
+                    _selectedLabReportIds.clear();
+                    _activeLabReportId = null;
+                    if (_labPanelOpen) {
+                      _labReportsFuture = ref.read(apiClientProvider).getList(
+                          '/api/v1/workstation/admissions/$value/reports');
+                    }
+                  });
                   _loadContext();
                 }
               },
@@ -313,12 +367,19 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
           ),
           ...items.map(
             (item) => InkWell(
-              onTap: () => setState(() => _selectedMenu = item.$3),
+              onTap: () {
+                if (item.$3 == 'lab_records') {
+                  _openLabPanel();
+                } else {
+                  setState(() => _selectedMenu = item.$3);
+                }
+              },
               child: Container(
                 width: double.infinity,
                 padding: const EdgeInsets.symmetric(vertical: 13),
                 decoration: BoxDecoration(
-                  color: _selectedMenu == item.$3
+                  color: (item.$3 == 'lab_records' && _labPanelOpen) ||
+                          _selectedMenu == item.$3
                       ? const Color(0xFFE3F3F8)
                       : Colors.white,
                   border: const Border(
@@ -337,6 +398,528 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
           ),
         ],
       ),
+    );
+  }
+
+  void _openLabPanel() {
+    setState(() {
+      _labPanelOpen = true;
+      _labReportsFuture = ref
+          .read(apiClientProvider)
+          .getList('/api/v1/workstation/admissions/${_admissionId!}/reports');
+    });
+  }
+
+  void _closeLabPanel() {
+    setState(() => _labPanelOpen = false);
+  }
+
+  void _resizeLabPanel(double delta, double maximum) {
+    final current = (_labPanelWidth ?? maximum * 0.5);
+    final next = (current - delta).clamp(360.0, maximum - 120.0).toDouble();
+    setState(() => _labPanelWidth = next);
+  }
+
+  Widget _labPanel(double width, double maximum) {
+    return Material(
+      elevation: 12,
+      color: Colors.white,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: Container(
+              decoration: const BoxDecoration(
+                color: Colors.white,
+                border: Border(
+                  left: BorderSide(color: WorkstationColors.border, width: 2),
+                ),
+              ),
+              child: Column(
+                children: [
+                  Expanded(child: _labPanelContent()),
+                ],
+              ),
+            ),
+          ),
+          Positioned(
+            left: -5,
+            top: 0,
+            bottom: 0,
+            child: MouseRegion(
+              cursor: SystemMouseCursors.resizeLeftRight,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onHorizontalDragUpdate: (details) =>
+                    _resizeLabPanel(details.delta.dx, maximum),
+                child: const SizedBox(width: 10),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _labPanelContent() {
+    return Column(
+      children: [
+        Container(
+          height: 40,
+          padding: const EdgeInsets.symmetric(horizontal: 12),
+          decoration: const BoxDecoration(
+            border: Border(bottom: BorderSide(color: WorkstationColors.border)),
+          ),
+          child: Row(
+            children: [
+              _labTab('住院检验', _labInpatient, () {
+                setState(() => _labInpatient = true);
+              }),
+              _labTab('门诊检验', !_labInpatient, () {
+                setState(() => _labInpatient = false);
+              }),
+              const Spacer(),
+              IconButton(
+                onPressed: _closeLabPanel,
+                tooltip: '关闭检验面板',
+                icon: const Icon(Icons.close, size: 20),
+              ),
+            ],
+          ),
+        ),
+        _labFilters(),
+        Expanded(flex: 4, child: _labReportTable()),
+        _labBottomActions(),
+        Expanded(flex: 5, child: _labResultTable()),
+      ],
+    );
+  }
+
+  Widget _labTab(String label, bool selected, VoidCallback onTap) {
+    return InkWell(
+      onTap: onTap,
+      child: Container(
+        height: 40,
+        padding: const EdgeInsets.symmetric(horizontal: 14),
+        decoration: BoxDecoration(
+          border: Border(
+            bottom: BorderSide(
+              color: selected ? WorkstationColors.cyan : Colors.transparent,
+              width: 3,
+            ),
+          ),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? WorkstationColors.blue : WorkstationColors.muted,
+            fontWeight: selected ? FontWeight.w700 : FontWeight.normal,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _labFilters() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(10, 6, 10, 5),
+      decoration: const BoxDecoration(
+        border: Border(bottom: BorderSide(color: WorkstationColors.border)),
+      ),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              OutlinedButton.icon(
+                style: OutlinedButton.styleFrom(
+                  minimumSize: const Size(0, 32),
+                  padding: const EdgeInsets.symmetric(horizontal: 8),
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: () {
+                  setState(() => _labCalendarOpen = !_labCalendarOpen);
+                },
+                icon: const Icon(Icons.calendar_month_outlined, size: 17),
+                label: Text(_labDateLabel),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: SizedBox(
+                  height: 32,
+                  child: TextField(
+                    decoration: const InputDecoration(
+                      isDense: true,
+                      hintText: '报告名称',
+                      prefixIcon: Icon(Icons.search, size: 17),
+                      contentPadding:
+                          EdgeInsets.symmetric(horizontal: 8, vertical: 7),
+                    ),
+                    onChanged: (value) {
+                      setState(() => _labReportKeyword = value.trim());
+                    },
+                  ),
+                ),
+              ),
+              IconButton(
+                constraints:
+                    const BoxConstraints.tightFor(width: 32, height: 32),
+                padding: EdgeInsets.zero,
+                onPressed: () => setState(() {
+                  _labReportsFuture = ref.read(apiClientProvider).getList(
+                      '/api/v1/workstation/admissions/${_admissionId!}/reports');
+                }),
+                tooltip: '刷新报告',
+                icon: const Icon(Icons.refresh, size: 19),
+              ),
+            ],
+          ),
+          if (_labCalendarOpen) ...[
+            const SizedBox(height: 6),
+            Container(
+              height: 300,
+              decoration: const BoxDecoration(
+                border: Border.fromBorderSide(
+                  BorderSide(color: WorkstationColors.border),
+                ),
+              ),
+              child: CalendarDatePicker(
+                initialDate: _labSelectedDate ?? DateTime.now(),
+                firstDate: DateTime(2020),
+                lastDate: DateTime(2035),
+                onDateChanged: (value) {
+                  setState(() {
+                    _labSelectedDate = value;
+                    _labDateLabel = _dateText(value);
+                    _labCalendarOpen = false;
+                  });
+                },
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  String _dateText(DateTime value) {
+    final month = value.month.toString().padLeft(2, '0');
+    final day = value.day.toString().padLeft(2, '0');
+    return '${value.year}-$month-$day';
+  }
+
+  Widget _labReportTable() {
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: _labReportsFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(child: Text(apiErrorMessage(snapshot.error!)));
+        }
+        final reports =
+            (snapshot.data ?? const <Map<String, dynamic>>[]).where((row) {
+          final reportName =
+              '${row['report_name'] ?? row['item_name'] ?? ''}'.toLowerCase();
+          final reportedAt = '${row['reported_at'] ?? ''}';
+          final nameMatches = _labReportKeyword.isEmpty ||
+              reportName.contains(_labReportKeyword.toLowerCase());
+          final dateMatches = _labSelectedDate == null ||
+              reportedAt.startsWith(_dateText(_labSelectedDate!));
+          return nameMatches && dateMatches;
+        }).toList();
+        return Column(
+          children: [
+            Container(
+              height: 44,
+              color: WorkstationColors.heading,
+              child: const Row(
+                children: [
+                  SizedBox(width: 48, child: Center(child: Text(''))),
+                  Expanded(
+                    flex: 2,
+                    child: Center(child: Text('报告日期')),
+                  ),
+                  Expanded(
+                    flex: 3,
+                    child: Center(child: Text('报告名称')),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: reports.isEmpty
+                  ? const Center(
+                      child: Text(
+                        '暂无数据',
+                        style: TextStyle(
+                          color: Color(0xFFC62828),
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    )
+                  : ListView.builder(
+                      itemCount: reports.length,
+                      itemBuilder: (context, index) {
+                        final row = reports[index];
+                        final reportId = (row['report_id'] as num?)?.toInt();
+                        final selected = reportId != null &&
+                            _selectedLabReportIds.contains(reportId);
+                        return InkWell(
+                          onTap: () {
+                            if (reportId == null) return;
+                            setState(() {
+                              if (selected) {
+                                _selectedLabReportIds.remove(reportId);
+                                if (_activeLabReportId == reportId) {
+                                  _activeLabReportId = null;
+                                }
+                              } else {
+                                _selectedLabReportIds.add(reportId);
+                                _activeLabReportId = reportId;
+                              }
+                            });
+                          },
+                          child: Container(
+                            height: 48,
+                            decoration: const BoxDecoration(
+                              border: Border(
+                                bottom:
+                                    BorderSide(color: WorkstationColors.border),
+                              ),
+                            ),
+                            child: Row(
+                              children: [
+                                SizedBox(
+                                  width: 48,
+                                  child: Checkbox(
+                                    value: selected,
+                                    onChanged: reportId == null
+                                        ? null
+                                        : (value) => setState(() {
+                                              if (value == true) {
+                                                _selectedLabReportIds
+                                                    .add(reportId);
+                                                _activeLabReportId = reportId;
+                                              } else {
+                                                _selectedLabReportIds
+                                                    .remove(reportId);
+                                                if (_activeLabReportId ==
+                                                    reportId) {
+                                                  _activeLabReportId = null;
+                                                }
+                                              }
+                                            }),
+                                  ),
+                                ),
+                                Expanded(
+                                  flex: 2,
+                                  child: Text(
+                                    displayValue(row['reported_at']),
+                                    textAlign: TextAlign.center,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                Expanded(
+                                  flex: 3,
+                                  child: Text(
+                                    displayValue(
+                                        row['report_name'] ?? row['item_name']),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _labBottomActions() {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 8, 12, 10),
+      decoration: const BoxDecoration(
+        border: Border(top: BorderSide(color: WorkstationColors.border)),
+      ),
+      child: Wrap(
+        spacing: 4,
+        runSpacing: 4,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          ..._labDisplayOptions.keys.map(_labOption),
+          const SizedBox(width: 8),
+          OutlinedButton.icon(
+            onPressed: _selectedLabReportIds.isEmpty ? null : () {},
+            icon: const Icon(Icons.description_outlined, size: 18),
+            label: const Text('报告单'),
+          ),
+          OutlinedButton.icon(
+            onPressed: _selectedLabReportIds.isEmpty ? null : () {},
+            icon: const Icon(Icons.show_chart, size: 18),
+            label: const Text('趋势图'),
+          ),
+          OutlinedButton.icon(
+            onPressed: _selectedLabReportIds.isEmpty ? null : () {},
+            icon: const Icon(Icons.reply_outlined, size: 18),
+            label: const Text('引用'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _labResultTable() {
+    final reportId = _activeLabReportId;
+    if (reportId == null) {
+      return _emptyLabResultTable('选择一份检验报告后查看指标明细');
+    }
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: ref
+          .read(apiClientProvider)
+          .getList('/api/v1/workstation/reports/$reportId/results'),
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(child: Text(apiErrorMessage(snapshot.error!)));
+        }
+        final rows = snapshot.data ?? const <Map<String, dynamic>>[];
+        if (rows.isEmpty) {
+          return _emptyLabResultTable('暂无指标明细');
+        }
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: SizedBox(
+            width: 920,
+            child: SingleChildScrollView(
+              child: DataTable(
+                headingRowColor:
+                    const WidgetStatePropertyAll(WorkstationColors.heading),
+                columnSpacing: 16,
+                columns: const [
+                  DataColumn(label: SizedBox(width: 34)),
+                  DataColumn(label: Text('序号')),
+                  DataColumn(label: Text('细项名称')),
+                  DataColumn(label: Text('定量')),
+                  DataColumn(label: Text('定性')),
+                  DataColumn(label: Text('提示')),
+                  DataColumn(label: Text('单位')),
+                  DataColumn(label: Text('参考范围')),
+                  DataColumn(label: Text('编码')),
+                ],
+                rows: List.generate(
+                  rows.length,
+                  (index) {
+                    final row = rows[index];
+                    final resultId = (row['result_id'] as num?)?.toInt();
+                    final resultSelected = resultId != null &&
+                        _selectedLabResultIds.contains(resultId);
+                    final abnormal = displayValue(row['abnormal_flag']);
+                    final abnormalText = abnormal == '-' ? '' : abnormal;
+                    return DataRow(
+                      cells: [
+                        DataCell(
+                          Checkbox(
+                            value: resultSelected,
+                            onChanged: resultId == null
+                                ? null
+                                : (value) => setState(() {
+                                      if (value == true) {
+                                        _selectedLabResultIds.add(resultId);
+                                      } else {
+                                        _selectedLabResultIds.remove(resultId);
+                                      }
+                                    }),
+                          ),
+                        ),
+                        DataCell(Text('${index + 1}')),
+                        DataCell(Text(displayValue(row['item_name']))),
+                        DataCell(Text(displayValue(row['quantitative_value']))),
+                        DataCell(Text(displayValue(row['qualitative_value']))),
+                        DataCell(Text(
+                          abnormalText,
+                          style: TextStyle(
+                            color: abnormalText.isEmpty
+                                ? null
+                                : Colors.red.shade700,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        )),
+                        DataCell(Text(displayValue(row['unit']))),
+                        DataCell(Text(displayValue(row['reference_range']))),
+                        DataCell(Text(displayValue(row['result_code']))),
+                      ],
+                    );
+                  },
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _emptyLabResultTable(String message) {
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: SizedBox(
+        width: 920,
+        child: DataTable(
+          headingRowColor:
+              const WidgetStatePropertyAll(WorkstationColors.heading),
+          columnSpacing: 16,
+          columns: const [
+            DataColumn(label: SizedBox(width: 34)),
+            DataColumn(label: Text('序号')),
+            DataColumn(label: Text('细项名称')),
+            DataColumn(label: Text('定量')),
+            DataColumn(label: Text('定性')),
+            DataColumn(label: Text('提示')),
+            DataColumn(label: Text('单位')),
+            DataColumn(label: Text('参考范围')),
+            DataColumn(label: Text('编码')),
+          ],
+          rows: [
+            DataRow(
+              cells: [
+                const DataCell(Checkbox(value: false, onChanged: null)),
+                DataCell(Text(message)),
+                const DataCell(Text('-')),
+                const DataCell(Text('-')),
+                const DataCell(Text('-')),
+                const DataCell(Text('-')),
+                const DataCell(Text('-')),
+                const DataCell(Text('-')),
+                const DataCell(Text('-')),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _labOption(String label) {
+    final selected = _labDisplayOptions[label] ?? false;
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Checkbox(
+          value: selected,
+          onChanged: (value) {
+            setState(() => _labDisplayOptions[label] = value ?? false);
+          },
+        ),
+        Text(label, style: const TextStyle(fontSize: 12)),
+      ],
     );
   }
 

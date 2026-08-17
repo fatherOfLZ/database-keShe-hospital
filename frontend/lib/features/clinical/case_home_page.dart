@@ -50,6 +50,7 @@ class _CaseHomePageState extends ConsumerState<CaseHomePage> {
 
   final Map<String, TextEditingController> _controllers = {};
   final Map<String, int?> _staffIds = {};
+  final Map<String, ScrollController> _diagnosisScrollControllers = {};
   List<Map<String, dynamic>> _staff = [];
   Map<String, dynamic>? _home;
   List<Map<String, dynamic>> _diagnoses = [];
@@ -73,7 +74,17 @@ class _CaseHomePageState extends ConsumerState<CaseHomePage> {
     for (final controller in _controllers.values) {
       controller.dispose();
     }
+    for (final controller in _diagnosisScrollControllers.values) {
+      controller.dispose();
+    }
     super.dispose();
+  }
+
+  ScrollController _diagnosisScrollController(String type) {
+    return _diagnosisScrollControllers.putIfAbsent(
+      type,
+      ScrollController.new,
+    );
   }
 
   TextEditingController _controller(String key) {
@@ -568,40 +579,47 @@ class _CaseHomePageState extends ConsumerState<CaseHomePage> {
               ],
             ),
           ),
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: DataTable(
-              headingRowColor:
-                  const WidgetStatePropertyAll(WorkstationColors.heading),
-              columns: _diagnosisColumns(type),
-              rows: rows.isEmpty
-                  ? [
-                      DataRow(
-                          cells: List<DataCell>.generate(
-                        _diagnosisColumns(type).length,
-                        (index) => DataCell(
-                          Text(index == 1 ? '暂无数据' : '-'),
-                        ),
-                      )),
-                    ]
-                  : List.generate(
-                      rows.length,
-                      (index) {
-                        final row = rows[index];
-                        final diagnosisId =
-                            (row['diagnosis_id'] as num?)?.toInt();
-                        final selected = diagnosisId != null &&
-                            _selectedDiagnosisIds.contains(diagnosisId);
-                        return DataRow(
-                            cells: _diagnosisCells(
-                          row,
-                          index,
-                          type,
-                          diagnosisId,
-                          selected,
-                        ));
-                      },
-                    ),
+          Scrollbar(
+            controller: _diagnosisScrollController(type),
+            thumbVisibility: true,
+            trackVisibility: true,
+            interactive: true,
+            child: SingleChildScrollView(
+              controller: _diagnosisScrollController(type),
+              scrollDirection: Axis.horizontal,
+              child: DataTable(
+                headingRowColor:
+                    const WidgetStatePropertyAll(WorkstationColors.heading),
+                columns: _diagnosisColumns(type),
+                rows: rows.isEmpty
+                    ? [
+                        DataRow(
+                            cells: List<DataCell>.generate(
+                          _diagnosisColumns(type).length,
+                          (index) => DataCell(
+                            Text(index == 1 ? '暂无数据' : '-'),
+                          ),
+                        )),
+                      ]
+                    : List.generate(
+                        rows.length,
+                        (index) {
+                          final row = rows[index];
+                          final diagnosisId =
+                              (row['diagnosis_id'] as num?)?.toInt();
+                          final selected = diagnosisId != null &&
+                              _selectedDiagnosisIds.contains(diagnosisId);
+                          return DataRow(
+                              cells: _diagnosisCells(
+                            row,
+                            index,
+                            type,
+                            diagnosisId,
+                            selected,
+                          ));
+                        },
+                      ),
+              ),
             ),
           ),
         ],
