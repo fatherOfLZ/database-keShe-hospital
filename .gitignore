@@ -1,0 +1,35 @@
+# Java
+backend/target/
+backend/.mvn/timing.properties
+.m2/
+
+# Flutter/Dart
+frontend/.dart_tool/
+frontend/.flutter-plugins
+frontend/.flutter-plugins-dependencies
+frontend/.packages
+frontend/build/
+frontend/.idea/
+frontend/*.iml
+frontend/android/.gradle/
+frontend/android/.kotlin/
+frontend/android/local.properties
+
+# IDE files
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Local reference material
+/refer_pics/
+
+# Local configuration
+backend/.env
+backend/application-local.yml
+backend/src/main/resources/application-local.yml
+backend/src/main/resources/application-*.local.yml

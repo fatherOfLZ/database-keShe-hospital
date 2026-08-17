@@ -1,0 +1,27 @@
+spring:
+  application:
+    name: hospital-management
+  datasource:
+    url: ${DB_URL:jdbc:mysql://localhost:3306/hospital_management?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${DB_USERNAME:root}
+    password: ${DB_PASSWORD:libing600188}
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: true
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+server:
+  port: ${SERVER_PORT:8080}
+app:
+  jwt:
+    secret: ${JWT_SECRET:change-this-to-a-32-byte-minimum-development-secret}
+    expiration-minutes: 480
+  cors:
+    # Flutter Web 调试端口由工具动态分配，开发环境需放行本机的任意端口。
+    # 部署时通过 CORS_ALLOWED_ORIGIN_PATTERNS 覆盖为实际前端域名。
+    allowed-origin-patterns: ${CORS_ALLOWED_ORIGIN_PATTERNS:http://localhost:*,http://127.0.0.1:*}
