@@ -30,6 +30,8 @@ public class DemoDataInitializer implements ApplicationRunner {
         if (users != null && users > 0) {
             ensureNurseAccount();
             ensureCaseHomeDemoData();
+            ensureExamReportDemoData();
+            ensureDiseaseReportDemoData();
             return;
         }
 
@@ -148,16 +150,24 @@ public class DemoDataInitializer implements ApplicationRunner {
             // 每位患者生成多条生命体征记录，满足课程演示的关联数据规模。
             for (int v = 0; v < 3; v++) {
                 jdbc.update(
-                        "INSERT INTO vital_sign(admission_id,measured_at,temperature,pulse,respiratory_rate,"
-                                + "systolic_bp,diastolic_bp,spo2,measured_by,remark) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                        "INSERT INTO vital_sign(admission_id,measured_at,temperature,pulse,heart_rate,respiratory_rate,"
+                                + "systolic_bp,diastolic_bp,spo2,pain_score,analgesic_pain_score,breakthrough_pain_score,"
+                                + "consciousness,intake_ml,output_ml,measured_by,remark) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                         admission,
                         LocalDateTime.now().minusHours(v * 6L),
                         new BigDecimal("36.5"),
                         70 + i % 12,
+                        72 + i % 12,
                         18,
                         120 + i % 15,
                         75 + i % 10,
                         new BigDecimal("98.0"),
+                        2,
+                        1,
+                        0,
+                        "清醒",
+                        new BigDecimal("300.0"),
+                        new BigDecimal("240.0"),
                         doctor,
                         "演示体征");
             }
@@ -240,6 +250,8 @@ public class DemoDataInitializer implements ApplicationRunner {
         // 与前五条在院住院记录保持一致，初始化完成后这五张床处于占用状态。
         jdbc.update("UPDATE bed SET status='OCCUPIED' WHERE bed_id IN (1,2,3,4,5)");
         ensureCaseHomeDemoData();
+        ensureExamReportDemoData();
+        ensureDiseaseReportDemoData();
     }
 
     /** 为已存在的旧演示库补齐护士账号，避免升级迁移后必须重建数据库。 */
@@ -310,6 +322,110 @@ public class DemoDataInitializer implements ApplicationRunner {
                         + "DATEDIFF(COALESCE(a.discharge_time,NOW()),a.admission_time)+1,a.attending_doctor_id "
                         + "FROM admission a LEFT JOIN system_user n ON n.username='nurse' "
                         + "WHERE a.attending_doctor_id IS NOT NULL AND a.inpatient_no LIKE 'IN2026%'");
+    }
+
+    /**
+     * 为参考工作站的检查抽屉准备可重复运行的住院及门诊报告样例。
+     * 使用固定业务号和 NOT EXISTS 防止升级后覆盖或重复写入用户已有数据。
+     */
+    private void ensureExamReportDemoData() {
+        jdbc.update(
+                "INSERT IGNORE INTO exam_order(order_no,admission_id,doctor_id,ordered_at,priority,status,clinical_note) "
+                        + "SELECT CONCAT('SEED-EXAM-',a.admission_id),a.admission_id,a.attending_doctor_id,"
+                        + "DATE_SUB(NOW(),INTERVAL 4 HOUR),'NORMAL','COMPLETED','演示住院头颅影像检查' "
+                        + "FROM admission a WHERE a.status='IN_HOSPITAL' AND a.attending_doctor_id IS NOT NULL "
+                        + "AND a.inpatient_no LIKE 'IN2026%'");
+        jdbc.update(
+                "INSERT INTO exam_order_item(exam_order_id,exam_item_id,execution_department_id,executed_at,status) "
+                        + "SELECT eo.exam_order_id,ei.exam_item_id,ei.department_id,DATE_SUB(NOW(),INTERVAL 3 HOUR),'REPORTED' "
+                        + "FROM exam_order eo JOIN admission a ON a.admission_id=eo.admission_id "
+                        + "JOIN exam_item ei ON ei.item_code='E003' "
+                        + "WHERE eo.order_no=CONCAT('SEED-EXAM-',a.admission_id) "
+                        + "AND NOT EXISTS (SELECT 1 FROM exam_order_item existing "
+                        + "WHERE existing.exam_order_id=eo.exam_order_id AND existing.exam_item_id=ei.exam_item_id)");
+        jdbc.update(
+                "INSERT IGNORE INTO exam_report(exam_order_item_id,report_name,reported_at,reported_by,finding_text,conclusion,status) "
+                        + "SELECT oi.exam_order_item_id,'头颅CT平扫',DATE_SUB(NOW(),INTERVAL 2 HOUR),eo.doctor_id,"
+                        + "'双侧额叶及基底节区见多发斑点状低密度影，脑室系统形态未见明显扩大。',"
+                        + "'腔隙性脑梗死，建议结合临床及必要时复查。','PUBLISHED' "
+                        + "FROM exam_order_item oi JOIN exam_order eo ON eo.exam_order_id=oi.exam_order_id "
+                        + "WHERE eo.order_no LIKE 'SEED-EXAM-%'");
+        jdbc.update(
+                "INSERT INTO exam_result(report_id,item_name,qualitative_value,remark,sort_no) "
+                        + "SELECT er.report_id,'头颅CT平扫','已完成','双侧额叶及基底节区多发低密度影',1 "
+                        + "FROM exam_report er WHERE er.report_name='头颅CT平扫' "
+                        + "AND NOT EXISTS (SELECT 1 FROM exam_result existing WHERE existing.report_id=er.report_id)");
+
+        jdbc.update(
+                "INSERT IGNORE INTO outpatient_visit(visit_no,patient_id,department_id,doctor_id,visited_at,status,clinical_note) "
+                        + "SELECT CONCAT('OP-SEED-',a.patient_id),a.patient_id,a.current_department_id,a.attending_doctor_id,"
+                        + "DATE_SUB(a.admission_time,INTERVAL 14 DAY),'COMPLETED','住院前门诊复查' "
+                        + "FROM admission a WHERE a.attending_doctor_id IS NOT NULL AND a.inpatient_no LIKE 'IN2026%'");
+        jdbc.update(
+                "INSERT IGNORE INTO outpatient_exam_order(order_no,outpatient_visit_id,doctor_id,ordered_at,priority,status,clinical_note) "
+                        + "SELECT CONCAT('OP-EXAM-',ov.outpatient_visit_id),ov.outpatient_visit_id,ov.doctor_id,"
+                        + "DATE_SUB(ov.visited_at,INTERVAL 1 HOUR),'NORMAL','COMPLETED','门诊影像随访' "
+                        + "FROM outpatient_visit ov WHERE ov.visit_no LIKE 'OP-SEED-%'");
+        jdbc.update(
+                "INSERT INTO outpatient_exam_order_item(outpatient_exam_order_id,exam_item_id,execution_department_id,executed_at,status) "
+                        + "SELECT oo.outpatient_exam_order_id,ei.exam_item_id,ei.department_id,"
+                        + "DATE_ADD(oo.ordered_at,INTERVAL 2 HOUR),'REPORTED' "
+                        + "FROM outpatient_exam_order oo JOIN exam_item ei ON ei.item_code='E003' "
+                        + "WHERE oo.order_no LIKE 'OP-EXAM-%' AND NOT EXISTS ("
+                        + "SELECT 1 FROM outpatient_exam_order_item existing WHERE existing.outpatient_exam_order_id=oo.outpatient_exam_order_id "
+                        + "AND existing.exam_item_id=ei.exam_item_id)");
+        jdbc.update(
+                "INSERT IGNORE INTO outpatient_exam_report(outpatient_exam_order_item_id,report_name,reported_at,reported_by,finding_text,conclusion,status) "
+                        + "SELECT oi.outpatient_exam_order_item_id,'门诊头颅CT平扫',DATE_ADD(oo.ordered_at,INTERVAL 3 HOUR),"
+                        + "oo.doctor_id,'双侧额叶白质区散在低密度灶，未见急性颅内出血征象。',"
+                        + "'慢性缺血性改变，建议神经内科随访。','PUBLISHED' "
+                        + "FROM outpatient_exam_order_item oi JOIN outpatient_exam_order oo "
+                        + "ON oo.outpatient_exam_order_id=oi.outpatient_exam_order_id WHERE oo.order_no LIKE 'OP-EXAM-%'");
+        jdbc.update(
+                "INSERT INTO outpatient_exam_result(outpatient_exam_report_id,item_name,qualitative_value,remark,sort_no) "
+                        + "SELECT er.outpatient_exam_report_id,'头颅CT平扫','已完成','未见急性出血征象',1 "
+                        + "FROM outpatient_exam_report er WHERE er.report_name='门诊头颅CT平扫' "
+                        + "AND NOT EXISTS (SELECT 1 FROM outpatient_exam_result existing "
+                        + "WHERE existing.outpatient_exam_report_id=er.outpatient_exam_report_id)");
+    }
+
+    /**
+     * 为疾病上报史准备已提交、已审核、已退回和草稿四种数据库记录。
+     * 这些仅是演示库种子数据，页面不会直接写入或依赖其中的患者、疾病和日期。
+     */
+    private void ensureDiseaseReportDemoData() {
+        jdbc.update(
+                "INSERT INTO disease_report(admission_id,report_type,disease_name,report_content,status,reported_by,"
+                        + "reported_at,created_at) SELECT a.admission_id,'INFECTIOUS','流行性感冒',"
+                        + "'演示疾病上报：待审核，出现发热、咳嗽等症状。','SUBMITTED',d.user_id,"
+                        + "DATE_SUB(NOW(),INTERVAL 2 DAY),DATE_SUB(NOW(),INTERVAL 3 DAY) FROM admission a "
+                        + "JOIN system_user d ON d.username='doctor' WHERE a.inpatient_no='IN20260001' "
+                        + "AND NOT EXISTS (SELECT 1 FROM disease_report r WHERE r.admission_id=a.admission_id "
+                        + "AND r.report_content LIKE '演示疾病上报：待审核%')");
+        jdbc.update(
+                "INSERT INTO disease_report(admission_id,report_type,disease_name,report_content,status,reported_by,"
+                        + "reported_at,reviewed_by,reviewed_at,review_note,created_at) SELECT a.admission_id,"
+                        + "'DEATH_CARD','死亡医学证明','演示疾病上报：已审核', 'APPROVED',d.user_id,"
+                        + "DATE_SUB(NOW(),INTERVAL 4 DAY),m.user_id,DATE_SUB(NOW(),INTERVAL 3 DAY),'资料完整，审核通过。',"
+                        + "DATE_SUB(NOW(),INTERVAL 5 DAY) FROM admission a JOIN system_user d ON d.username='doctor' "
+                        + "JOIN system_user m ON m.username='admin' WHERE a.inpatient_no='IN20260001' "
+                        + "AND NOT EXISTS (SELECT 1 FROM disease_report r WHERE r.admission_id=a.admission_id "
+                        + "AND r.report_content='演示疾病上报：已审核')");
+        jdbc.update(
+                "INSERT INTO disease_report(admission_id,report_type,disease_name,report_content,status,reported_by,"
+                        + "reported_at,reviewed_by,reviewed_at,review_note,created_at) SELECT a.admission_id,"
+                        + "'INFECTIOUS','病毒性肝炎','演示疾病上报：已退回','RETURNED',d.user_id,"
+                        + "DATE_SUB(NOW(),INTERVAL 6 DAY),m.user_id,DATE_SUB(NOW(),INTERVAL 5 DAY),'请补充患者接触史。',"
+                        + "DATE_SUB(NOW(),INTERVAL 7 DAY) FROM admission a JOIN system_user d ON d.username='doctor' "
+                        + "JOIN system_user m ON m.username='admin' WHERE a.inpatient_no='IN20260001' "
+                        + "AND NOT EXISTS (SELECT 1 FROM disease_report r WHERE r.admission_id=a.admission_id "
+                        + "AND r.report_content='演示疾病上报：已退回')");
+        jdbc.update(
+                "INSERT INTO disease_report(admission_id,report_type,disease_name,report_content,status,reported_by,"
+                        + "created_at) SELECT a.admission_id,'INFECTIOUS','水痘','演示疾病上报：草稿','DRAFT',d.user_id,"
+                        + "DATE_SUB(NOW(),INTERVAL 1 DAY) FROM admission a JOIN system_user d ON d.username='doctor' "
+                        + "WHERE a.inpatient_no='IN20260001' AND NOT EXISTS (SELECT 1 FROM disease_report r "
+                        + "WHERE r.admission_id=a.admission_id AND r.report_content='演示疾病上报：草稿')");
     }
 
     private long id(String sql) {

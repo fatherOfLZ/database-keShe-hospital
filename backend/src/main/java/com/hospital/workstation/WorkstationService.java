@@ -53,6 +53,38 @@ public class WorkstationService {
         throw new BusinessException("当前账号无权访问住院临床资料");
     }
 
+    /** 门诊历史只可从当前有权访问的住院患者上下文进入，避免跨患者查询。 */
+    public void requireOutpatientVisitReadAccess(long admissionId, long visitId, JwtUser actor) {
+        requireReadAccess(admissionId, actor);
+        Long matches = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM outpatient_visit ov JOIN admission a ON a.patient_id=ov.patient_id "
+                        + "WHERE ov.outpatient_visit_id=? AND a.admission_id=?",
+                Long.class,
+                visitId,
+                admissionId);
+        if (matches == null || matches == 0) {
+            throw new BusinessException("门诊就诊记录不属于当前患者");
+        }
+    }
+
+    /** 门诊报告同样通过当前住院记录验证患者归属，防止直接猜测报告编号读取。 */
+    public void requireOutpatientReportReadAccess(long admissionId, long reportId, JwtUser actor) {
+        requireReadAccess(admissionId, actor);
+        Long matches = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM outpatient_exam_report r "
+                        + "JOIN outpatient_exam_order_item oi ON oi.outpatient_exam_order_item_id=r.outpatient_exam_order_item_id "
+                        + "JOIN outpatient_exam_order o ON o.outpatient_exam_order_id=oi.outpatient_exam_order_id "
+                        + "JOIN outpatient_visit ov ON ov.outpatient_visit_id=o.outpatient_visit_id "
+                        + "JOIN admission a ON a.patient_id=ov.patient_id "
+                        + "WHERE r.outpatient_exam_report_id=? AND a.admission_id=?",
+                Long.class,
+                reportId,
+                admissionId);
+        if (matches == null || matches == 0) {
+            throw new BusinessException("门诊检查报告不属于当前患者");
+        }
+    }
+
     /** 医师写入前同时校验责任医师、在院状态和禁止管理员代写的规则。 */
     public void requireDoctorWrite(long admissionId, JwtUser actor) {
         if (!"DOCTOR".equals(actor.roleCode())) {
@@ -239,6 +271,21 @@ public class WorkstationService {
         String resolvedTitle = title == null || title.isBlank()
                 ? template.get("template_name").toString()
                 : title;
+        if ("ADMISSION_RECORD".equals(resolvedCode)) {
+            // Lock the admission row so concurrent requests cannot create two current admission records.
+            jdbc.queryForObject(
+                    "SELECT admission_id FROM admission WHERE admission_id=? FOR UPDATE",
+                    Long.class,
+                    admissionId);
+            Long activeCount = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM medical_record WHERE admission_id=? AND document_code='ADMISSION_RECORD' "
+                            + "AND status<>'VOID'",
+                    Long.class,
+                    admissionId);
+            if (activeCount != null && activeCount > 0) {
+                throw new BusinessException("本次住院已有入院记录，请编辑草稿或发起修订");
+            }
+        }
         jdbc.update(
                 "INSERT INTO medical_record(admission_id,record_type,document_code,title,template_name,content,"
                         + "content_json,recorded_by,status,version_no) VALUES (?,?,?,?,?,?,?,?,'DRAFT',1)",
@@ -253,6 +300,34 @@ public class WorkstationService {
         long recordId = lastInsertId();
         audit(recordId, "CREATE", "创建文书草稿", actor.userId());
         return recordId;
+    }
+
+    /** 草稿可以更正正文；提交后的文书必须经签名或修订流程，不能被直接覆盖。 */
+    @Transactional
+    public void updateDocument(
+            long recordId,
+            String title,
+            String content,
+            String contentJson,
+            JwtUser actor) {
+        Map<String, Object> record = jdbc.queryForMap(
+                "SELECT admission_id,status FROM medical_record WHERE record_id=? FOR UPDATE",
+                recordId);
+        long admissionId = ((Number) record.get("admission_id")).longValue();
+        requireDoctorWrite(admissionId, actor);
+        if (!"DRAFT".equals(record.get("status"))) {
+            throw new BusinessException("只有草稿文书可以编辑，已提交或已签名文书请走修订流程");
+        }
+        int updated = jdbc.update(
+                "UPDATE medical_record SET title=?,content=?,content_json=? WHERE record_id=? AND status='DRAFT'",
+                title,
+                content,
+                contentJson,
+                recordId);
+        if (updated == 0) {
+            throw new BusinessException("文书状态已变化，请刷新后重试");
+        }
+        audit(recordId, "UPDATE", "更新文书草稿", actor.userId());
     }
 
     /** 提交文书后禁止直接覆盖内容，待签名或修订流程继续处理。 */
@@ -480,6 +555,13 @@ public class WorkstationService {
     @Transactional
     public long createDiseaseReport(long admissionId, String type, String diseaseName, String content, JwtUser actor) {
         requireDoctorWrite(admissionId, actor);
+        Long enabledTypeCount = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM disease_report_type WHERE type_code=? AND status='ACTIVE'",
+                Long.class,
+                type);
+        if (enabledTypeCount == null || enabledTypeCount == 0) {
+            throw new BusinessException("请选择有效的疾病上报类型");
+        }
         jdbc.update(
                 "INSERT INTO disease_report(admission_id,report_type,disease_name,report_content,reported_by) "
                         + "VALUES (?,?,?,?,?)",
@@ -531,6 +613,30 @@ public class WorkstationService {
                 actor.userId(),
                 note,
                 reportId);
+    }
+
+    /** 记录已成功发起的疾病上报导出或打印，列表据此动态显示打印标识。 */
+    @Transactional
+    public void recordDiseaseReportOutput(long admissionId, List<Long> reportIds, String outputType, JwtUser actor) {
+        requireReadAccess(admissionId, actor);
+        if (!"PRINT".equals(outputType) && !"EXPORT".equals(outputType)) {
+            throw new BusinessException("不支持的疾病上报输出类型");
+        }
+        for (Long reportId : reportIds) {
+            Long matched = jdbc.queryForObject(
+                    "SELECT COUNT(*) FROM disease_report WHERE disease_report_id=? AND admission_id=?",
+                    Long.class,
+                    reportId,
+                    admissionId);
+            if (matched == null || matched == 0) {
+                throw new BusinessException("疾病上报记录不属于当前住院患者");
+            }
+            jdbc.update(
+                    "INSERT INTO disease_report_output_log(disease_report_id,output_type,output_by) VALUES (?,?,?)",
+                    reportId,
+                    outputType,
+                    actor.userId());
+        }
     }
 
     /** 记录 PDF 导出请求，模板未配置时明确返回可追踪的等待状态。 */

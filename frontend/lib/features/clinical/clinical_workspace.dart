@@ -300,6 +300,7 @@ class _ClinicalWorkspaceState extends ConsumerState<ClinicalWorkspace> {
         title: '录入报告：${item['item_name']}',
         fields: const [
           FieldSpec('reportName', '报告名称', required: true),
+          FieldSpec('findingText', '检查所见', multiline: true),
           FieldSpec('conclusion', '结论', multiline: true),
           FieldSpec('itemName', '结果项目名称', required: true),
           FieldSpec('qualitativeValue', '定性结果'),
@@ -314,6 +315,7 @@ class _ClinicalWorkspaceState extends ConsumerState<ClinicalWorkspace> {
       }
       final payload = <String, dynamic>{
         'reportName': values.remove('reportName'),
+        'findingText': values.remove('findingText'),
         'conclusion': values.remove('conclusion'),
         'results': [
           {

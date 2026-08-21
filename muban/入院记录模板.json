@@ -1,0 +1,29 @@
+{
+  "templateCode": "ADMISSION_RECORD",
+  "templateName": "入院记录",
+  "version": 1,
+  "documentCategory": "DOCTOR",
+  "specialtyExtension": {
+    "code": "NEU",
+    "name": "神经系统查体",
+    "defaultExpanded": true
+  },
+  "sections": [
+    {
+      "name": "病史",
+      "fields": ["主诉", "现病史", "既往史", "个人史", "婚育/月经史", "家族史"]
+    },
+    {
+      "name": "体格检查",
+      "fields": ["生命体征", "一般情况", "皮肤黏膜与浅表淋巴结", "头颈部", "心肺", "腹部", "泌尿生殖系统", "脊柱四肢"]
+    },
+    {
+      "name": "神经系统查体（可选）",
+      "fields": ["意识与精神状态", "脑神经", "运动与肌张力", "感觉", "共济", "深浅反射", "病理反射", "脑膜刺激征"]
+    },
+    {
+      "name": "诊疗信息",
+      "fields": ["辅助检查", "初步诊断", "诊断依据", "诊疗计划", "患者或家属意见"]
+    }
+  ]
+}

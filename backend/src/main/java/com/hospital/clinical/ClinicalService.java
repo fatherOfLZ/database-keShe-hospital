@@ -173,6 +173,7 @@ public class ClinicalService {
     public void publishReport(
             long orderItemId,
             String name,
+            String findingText,
             String conclusion,
             List<ClinicalController.ResultRequest> results,
             JwtUser actor) {
@@ -186,13 +187,14 @@ public class ClinicalService {
             throw new BusinessException("已取消的项目不能录入报告");
         }
 
-        // 报告主表保存结论，指标明细另表保存以支持一个检查项目有多个结果。
+        // 报告主表分别保存检查所见和诊断结论，指标明细另表保存以支持多项结果。
         jdbc.update(
-                "INSERT INTO exam_report(exam_order_item_id,report_name,reported_by,conclusion,status) "
-                        + "VALUES (?,?,?,?, 'PUBLISHED')",
+                "INSERT INTO exam_report(exam_order_item_id,report_name,reported_by,finding_text,conclusion,status) "
+                        + "VALUES (?,?,?,?,?, 'PUBLISHED')",
                 orderItemId,
                 name,
                 actor.userId(),
+                findingText,
                 conclusion);
         long reportId = jdbc.queryForObject("SELECT LAST_INSERT_ID()", Long.class);
 
@@ -230,5 +232,16 @@ public class ClinicalService {
                 "UPDATE exam_order SET status=? WHERE exam_order_id=?",
                 outstanding == 0 ? "COMPLETED" : "PARTIAL_REPORTED",
                 orderId);
+    }
+
+    /** 兼容已有调用方；未提供检查所见时仍可发布历史格式的报告。 */
+    @Transactional
+    public void publishReport(
+            long orderItemId,
+            String name,
+            String conclusion,
+            List<ClinicalController.ResultRequest> results,
+            JwtUser actor) {
+        publishReport(orderItemId, name, null, conclusion, results, actor);
     }
 }

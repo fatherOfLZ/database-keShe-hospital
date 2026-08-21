@@ -199,6 +199,7 @@ public class ClinicalController {
         service.publishReport(
                 itemId,
                 request.reportName(),
+                request.findingText(),
                 request.conclusion(),
                 request.results(),
                 CurrentUser.get());
@@ -272,6 +273,7 @@ public class ClinicalController {
     /** 项目报告参数，报告主结论与逐项结果分开保存。 */
     public record ReportRequest(
             @NotBlank String reportName,
+            String findingText,
             String conclusion,
             @NotNull List<@Valid ResultRequest> results) {
     }

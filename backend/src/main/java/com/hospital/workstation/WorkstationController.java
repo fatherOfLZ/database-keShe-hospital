@@ -5,7 +5,10 @@ import com.hospital.common.BusinessException;
 import com.hospital.security.CurrentUser;
 import com.hospital.security.JwtUser;
 import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
 import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotEmpty;
 import jakarta.validation.constraints.NotNull;
 import java.math.BigDecimal;
 import java.time.LocalDateTime;
@@ -69,7 +72,7 @@ public class WorkstationController {
         String sql = "SELECT a.*,p.patient_no,p.name AS patient_name,p.gender,p.birth_date,p.height_cm,p.weight_kg,"
                 + "p.phone,p.id_type,p.id_card_no,p.nationality,p.occupation,p.marital_status,p.birth_place,"
                 + "p.registered_address,p.current_address,p.address,p.postal_code,p.emergency_contact_name,"
-                + "p.emergency_contact_relation,p.emergency_contact_phone,d.department_name,b.bed_no,"
+                + "p.emergency_contact_relation,p.emergency_contact_phone,d.department_code,d.department_name,b.bed_no,"
                 + "u.real_name AS doctor_name,DATEDIFF(NOW(),a.admission_time) + 1 AS stay_days "
                 + "FROM admission a JOIN patient p ON p.patient_id=a.patient_id "
                 + "JOIN department d ON d.department_id=a.current_department_id "
@@ -247,6 +250,20 @@ public class WorkstationController {
         return ApiResponse.ok(Map.of("recordId", recordId));
     }
 
+    /** 仅草稿状态可原位编辑，提交后的任何改动均通过既有修订链路保留历史版本。 */
+    @PutMapping("/documents/{recordId}")
+    public ApiResponse<Void> updateDocument(
+            @PathVariable long recordId,
+            @Valid @RequestBody DocumentUpdateRequest request) {
+        service.updateDocument(
+                recordId,
+                request.title(),
+                request.content(),
+                request.contentJson(),
+                CurrentUser.get());
+        return ApiResponse.ok(null);
+    }
+
     @PostMapping("/documents/{recordId}/submit")
     public ApiResponse<Void> submitDocument(@PathVariable long recordId) {
         service.submitDocument(recordId, CurrentUser.get());
@@ -418,18 +435,21 @@ public class WorkstationController {
             @Valid @RequestBody VitalSignRequest request) {
         service.requireNurseWrite(admissionId, CurrentUser.get());
         jdbc.update(
-                "INSERT INTO vital_sign(admission_id,measured_at,temperature,pulse,respiratory_rate,systolic_bp,"
-                        + "diastolic_bp,spo2,pain_score,consciousness,intake_ml,output_ml,measured_by,remark) "
-                        + "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO vital_sign(admission_id,measured_at,temperature,pulse,heart_rate,respiratory_rate,systolic_bp,"
+                        + "diastolic_bp,spo2,pain_score,analgesic_pain_score,breakthrough_pain_score,consciousness,"
+                        + "intake_ml,output_ml,measured_by,remark) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 admissionId,
                 request.measuredAt() == null ? LocalDateTime.now() : request.measuredAt(),
                 request.temperature(),
                 request.pulse(),
+                request.heartRate(),
                 request.respiratoryRate(),
                 request.systolicBp(),
                 request.diastolicBp(),
                 request.spo2(),
                 request.painScore(),
+                request.analgesicPainScore(),
+                request.breakthroughPainScore(),
                 request.consciousness(),
                 request.intakeMl(),
                 request.outputMl(),
@@ -444,8 +464,9 @@ public class WorkstationController {
             @RequestParam(required = false) LocalDateTime from,
             @RequestParam(required = false) LocalDateTime to) {
         service.requireReadAccess(admissionId, CurrentUser.get());
-        String sql = "SELECT measured_at,temperature,pulse,respiratory_rate,systolic_bp,diastolic_bp,spo2,"
-                + "pain_score,consciousness,intake_ml,output_ml FROM vital_sign WHERE admission_id=?";
+        String sql = "SELECT measured_at,temperature,pulse,heart_rate,respiratory_rate,systolic_bp,diastolic_bp,spo2,"
+                + "pain_score,analgesic_pain_score,breakthrough_pain_score,consciousness,intake_ml,output_ml "
+                + "FROM vital_sign WHERE admission_id=?";
         if (from != null && to != null) {
             return ApiResponse.ok(jdbc.queryForList(sql + " AND measured_at BETWEEN ? AND ? ORDER BY measured_at", admissionId, from, to));
         }
@@ -560,9 +581,16 @@ public class WorkstationController {
     public ApiResponse<List<Map<String, Object>>> diseaseReports(@PathVariable long admissionId) {
         service.requireReadAccess(admissionId, CurrentUser.get());
         return ApiResponse.ok(jdbc.queryForList(
-                "SELECT r.*,u.real_name AS reporter_name,s.real_name AS reviewer_name FROM disease_report r "
+                "SELECT r.*,t.type_name AS report_type_name,u.real_name AS reporter_name,"
+                        + "s.real_name AS reviewer_name,COALESCE(o.print_count,0) AS print_count,"
+                        + "o.last_printed_at FROM disease_report r "
+                        + "LEFT JOIN disease_report_type t ON t.type_code=r.report_type "
                         + "JOIN system_user u ON u.user_id=r.reported_by LEFT JOIN system_user s "
-                        + "ON s.user_id=r.reviewed_by WHERE r.admission_id=? ORDER BY r.disease_report_id DESC",
+                        + "ON s.user_id=r.reviewed_by LEFT JOIN ("
+                        + "SELECT disease_report_id,COUNT(*) AS print_count,MAX(output_at) AS last_printed_at "
+                        + "FROM disease_report_output_log WHERE output_type='PRINT' GROUP BY disease_report_id"
+                        + ") o ON o.disease_report_id=r.disease_report_id "
+                        + "WHERE r.admission_id=? ORDER BY r.created_at DESC,r.disease_report_id DESC",
                 admissionId));
     }
 
@@ -605,6 +633,18 @@ public class WorkstationController {
             @PathVariable long reportId,
             @Valid @RequestBody DiseaseReviewRequest request) {
         service.reviewDiseaseReport(reportId, request.approved(), request.note(), CurrentUser.get());
+        return ApiResponse.ok(null);
+    }
+
+    @PostMapping("/admissions/{admissionId}/disease-reports/output-events")
+    public ApiResponse<Void> recordDiseaseReportOutput(
+            @PathVariable long admissionId,
+            @Valid @RequestBody DiseaseReportOutputRequest request) {
+        service.recordDiseaseReportOutput(
+                admissionId,
+                request.reportIds(),
+                request.outputType(),
+                CurrentUser.get());
         return ApiResponse.ok(null);
     }
 
@@ -672,6 +712,89 @@ public class WorkstationController {
                 + "JOIN exam_item ei ON ei.exam_item_id=eoi.exam_item_id LEFT JOIN exam_report er "
                 + "ON er.exam_order_item_id=eoi.exam_order_item_id WHERE eo.admission_id=? ORDER BY eo.ordered_at DESC";
         return ApiResponse.ok(jdbc.queryForList(sql, admissionId));
+    }
+
+    /** 住院检查抽屉只返回检查类项目，检验类数据继续由原检验入口消费。 */
+    @GetMapping("/admissions/{admissionId}/exam-reports")
+    public ApiResponse<List<Map<String, Object>>> inpatientExamReports(@PathVariable long admissionId) {
+        service.requireReadAccess(admissionId, CurrentUser.get());
+        String sql = "SELECT er.report_id,er.report_name,er.reported_at,er.finding_text,er.conclusion,"
+                + "eo.order_no,ei.item_name,d.department_name,u.real_name AS reporter_name "
+                + "FROM exam_report er JOIN exam_order_item eoi ON eoi.exam_order_item_id=er.exam_order_item_id "
+                + "JOIN exam_order eo ON eo.exam_order_id=eoi.exam_order_id "
+                + "JOIN exam_item ei ON ei.exam_item_id=eoi.exam_item_id "
+                + "LEFT JOIN department d ON d.department_id=eoi.execution_department_id "
+                + "LEFT JOIN system_user u ON u.user_id=er.reported_by "
+                + "WHERE eo.admission_id=? AND ei.item_type='EXAM' AND er.status='PUBLISHED' "
+                + "ORDER BY er.reported_at DESC,er.report_id DESC";
+        return ApiResponse.ok(jdbc.queryForList(sql, admissionId));
+    }
+
+    @GetMapping("/admissions/{admissionId}/exam-reports/{reportId}/results")
+    public ApiResponse<List<Map<String, Object>>> inpatientExamReportResults(
+            @PathVariable long admissionId,
+            @PathVariable long reportId) {
+        service.requireReadAccess(admissionId, CurrentUser.get());
+        Long matches = jdbc.queryForObject(
+                "SELECT COUNT(*) FROM exam_report er JOIN exam_order_item eoi "
+                        + "ON eoi.exam_order_item_id=er.exam_order_item_id "
+                        + "JOIN exam_order eo ON eo.exam_order_id=eoi.exam_order_id "
+                        + "JOIN exam_item ei ON ei.exam_item_id=eoi.exam_item_id "
+                        + "WHERE er.report_id=? AND eo.admission_id=? AND ei.item_type='EXAM'",
+                Long.class,
+                reportId,
+                admissionId);
+        if (matches == null || matches == 0) {
+            throw new BusinessException("检查报告不属于当前住院记录");
+        }
+        return ApiResponse.ok(jdbc.queryForList(
+                "SELECT result_id,item_name,qualitative_value,quantitative_value,unit,reference_range,"
+                        + "abnormal_flag,remark,sort_no FROM exam_result WHERE report_id=? "
+                        + "ORDER BY sort_no,result_id",
+                reportId));
+    }
+
+    /** 当前住院患者的门诊就诊历史，仅供检查报告抽屉切换数据源。 */
+    @GetMapping("/admissions/{admissionId}/outpatient-visits")
+    public ApiResponse<List<Map<String, Object>>> outpatientVisits(@PathVariable long admissionId) {
+        service.requireReadAccess(admissionId, CurrentUser.get());
+        String sql = "SELECT ov.outpatient_visit_id,ov.visit_no,ov.visited_at,ov.status,"
+                + "d.department_name,u.real_name AS doctor_name FROM outpatient_visit ov "
+                + "JOIN admission a ON a.patient_id=ov.patient_id "
+                + "LEFT JOIN department d ON d.department_id=ov.department_id "
+                + "LEFT JOIN system_user u ON u.user_id=ov.doctor_id WHERE a.admission_id=? "
+                + "ORDER BY ov.visited_at DESC,ov.outpatient_visit_id DESC";
+        return ApiResponse.ok(jdbc.queryForList(sql, admissionId));
+    }
+
+    @GetMapping("/admissions/{admissionId}/outpatient-visits/{visitId}/exam-reports")
+    public ApiResponse<List<Map<String, Object>>> outpatientExamReports(
+            @PathVariable long admissionId,
+            @PathVariable long visitId) {
+        service.requireOutpatientVisitReadAccess(admissionId, visitId, CurrentUser.get());
+        String sql = "SELECT r.outpatient_exam_report_id AS report_id,r.report_name,r.reported_at,r.finding_text,"
+                + "r.conclusion,o.order_no,ei.item_name,d.department_name,u.real_name AS reporter_name "
+                + "FROM outpatient_exam_report r "
+                + "JOIN outpatient_exam_order_item oi ON oi.outpatient_exam_order_item_id=r.outpatient_exam_order_item_id "
+                + "JOIN outpatient_exam_order o ON o.outpatient_exam_order_id=oi.outpatient_exam_order_id "
+                + "JOIN exam_item ei ON ei.exam_item_id=oi.exam_item_id "
+                + "LEFT JOIN department d ON d.department_id=oi.execution_department_id "
+                + "LEFT JOIN system_user u ON u.user_id=r.reported_by "
+                + "WHERE o.outpatient_visit_id=? AND ei.item_type='EXAM' AND r.status='PUBLISHED' "
+                + "ORDER BY r.reported_at DESC,r.outpatient_exam_report_id DESC";
+        return ApiResponse.ok(jdbc.queryForList(sql, visitId));
+    }
+
+    @GetMapping("/admissions/{admissionId}/outpatient-exam-reports/{reportId}/results")
+    public ApiResponse<List<Map<String, Object>>> outpatientExamReportResults(
+            @PathVariable long admissionId,
+            @PathVariable long reportId) {
+        service.requireOutpatientReportReadAccess(admissionId, reportId, CurrentUser.get());
+        return ApiResponse.ok(jdbc.queryForList(
+                "SELECT outpatient_exam_result_id AS result_id,item_name,qualitative_value,quantitative_value,"
+                        + "unit,reference_range,abnormal_flag,remark,sort_no FROM outpatient_exam_result "
+                        + "WHERE outpatient_exam_report_id=? ORDER BY sort_no,outpatient_exam_result_id",
+                reportId));
     }
 
     @GetMapping("/reports/{reportId}/attachments")
@@ -774,6 +897,12 @@ public class WorkstationController {
             String contentJson) {
     }
 
+    public record DocumentUpdateRequest(
+            @NotBlank String title,
+            @NotBlank String content,
+            @NotBlank String contentJson) {
+    }
+
     public record SignRequest(String patientOpinion) {
     }
 
@@ -815,11 +944,17 @@ public class WorkstationController {
             LocalDateTime measuredAt,
             BigDecimal temperature,
             Integer pulse,
+            Integer heartRate,
             Integer respiratoryRate,
             Integer systolicBp,
             Integer diastolicBp,
             BigDecimal spo2,
+            @Min(0) @Max(10)
             Integer painScore,
+            @Min(0) @Max(10)
+            Integer analgesicPainScore,
+            @Min(0) @Max(10)
+            Integer breakthroughPainScore,
             String consciousness,
             BigDecimal intakeMl,
             BigDecimal outputMl,
@@ -865,6 +1000,11 @@ public class WorkstationController {
     }
 
     public record DiseaseReviewRequest(@NotNull Boolean approved, String note) {
+    }
+
+    public record DiseaseReportOutputRequest(
+            @NotEmpty List<@NotNull @Min(1) Long> reportIds,
+            @NotBlank String outputType) {
     }
 
     public record SurgeryRequest(

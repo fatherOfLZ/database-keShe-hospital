@@ -6,7 +6,14 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/ui_helpers.dart';
 import '../../core/workstation_ui.dart';
 import '../auth/auth_controller.dart';
+import 'admission_record_page.dart';
 import 'case_home_page.dart';
+import 'course_record_page.dart';
+import 'disease_report_history_page.dart';
+import 'diagnosis_reference_page.dart';
+import 'inpatient_order_page.dart';
+import 'vital_signs_page.dart';
+import 'exam_report_panel.dart';
 
 /// 参考图片中的临床工作站：左侧菜单始终围绕当前选中的在院患者展开。
 class ClinicalWorkstation extends ConsumerStatefulWidget {
@@ -27,6 +34,8 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
   String _selectedMenu = 'record_home';
   bool _labPanelOpen = false;
   double? _labPanelWidth;
+  bool _examPanelOpen = false;
+  double? _examPanelWidth;
   bool _labInpatient = true;
   bool _labCalendarOpen = false;
   DateTime? _labSelectedDate;
@@ -44,6 +53,17 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
     '时分': false,
     '全部显示': false,
   };
+  bool _orderPanelOpen = false;
+  Future<List<Map<String, dynamic>>>? _orderPanelFuture;
+  String _orderPanelClass = '';
+  String _orderPanelStatus = '';
+  String _orderPanelKeyword = '';
+  final _orderPanelKeywordController = TextEditingController();
+  DateTime? _orderPanelStartDate;
+  DateTime? _orderPanelEndDate;
+  bool _nursingPanelOpen = false;
+  bool _nursingPanelMounted = false;
+  String _nursingPanelSection = 'vitals';
   bool _loading = true;
   String _keyword = '';
 
@@ -54,6 +74,12 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
   void initState() {
     super.initState();
     _loadAdmissions();
+  }
+
+  @override
+  void dispose() {
+    _orderPanelKeywordController.dispose();
+    super.dispose();
   }
 
   Future<void> _loadAdmissions() async {
@@ -117,6 +143,13 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
 
   int _id(dynamic value) => (value as num).toInt();
 
+  num? _numberValue(dynamic value) {
+    if (value is num) {
+      return value;
+    }
+    return value == null ? null : num.tryParse(value.toString());
+  }
+
   @override
   Widget build(BuildContext context) {
     final desktop = MediaQuery.sizeOf(context).width >= 900;
@@ -155,7 +188,10 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
       builder: (context, constraints) {
         final maximum = constraints.maxWidth;
         final initialWidth = maximum * 0.5;
-        final width = (_labPanelWidth ?? initialWidth)
+        final labWidth = (_labPanelWidth ?? initialWidth)
+            .clamp(360.0, maximum - 120.0)
+            .toDouble();
+        final examWidth = (_examPanelWidth ?? initialWidth)
             .clamp(360.0, maximum - 120.0)
             .toDouble();
         return Stack(
@@ -167,8 +203,41 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
                 top: 0,
                 right: 0,
                 bottom: 0,
-                width: width,
-                child: _labPanel(width, maximum),
+                width: labWidth,
+                child: _labPanel(labWidth, maximum),
+              ),
+            if (_examPanelOpen)
+              Positioned(
+                top: 0,
+                right: 0,
+                bottom: 0,
+                width: examWidth,
+                child: _examPanel(examWidth, maximum),
+              ),
+            Positioned.fill(
+              child: IgnorePointer(
+                ignoring: !_orderPanelOpen,
+                child: AnimatedSlide(
+                  offset: _orderPanelOpen ? Offset.zero : const Offset(1, 0),
+                  duration: const Duration(milliseconds: 220),
+                  curve: Curves.easeOutCubic,
+                  child: _orderPanel(),
+                ),
+              ),
+            ),
+            if (_nursingPanelMounted)
+              Positioned.fill(
+                child: IgnorePointer(
+                  ignoring: !_nursingPanelOpen,
+                  child: AnimatedSlide(
+                    offset: _nursingPanelOpen
+                        ? Offset.zero
+                        : const Offset(1, 0),
+                    duration: const Duration(milliseconds: 220),
+                    curve: Curves.easeOutCubic,
+                    child: _nursingPanel(),
+                  ),
+                ),
               ),
           ],
         );
@@ -227,6 +296,9 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
                       _labReportsFuture = ref.read(apiClientProvider).getList(
                           '/api/v1/workstation/admissions/$value/reports');
                     }
+                    if (_orderPanelOpen) {
+                      _orderPanelFuture = _loadOrderPanel();
+                    }
                   });
                   _loadContext();
                 }
@@ -244,17 +316,32 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
       (_context!['allergies'] as List)
           .map((item) => Map<String, dynamic>.from(item as Map)),
     );
-    final facts = <String, String>{
-      '住院号': displayValue(admission['inpatient_no']),
-      '病案号': displayValue(admission['medical_record_no']),
-      '床号': displayValue(admission['bed_no']),
-      '住院天数': '${displayValue(admission['stay_days'])} 天',
-      '护理等级': displayValue(admission['nursing_level']),
-      '科室': displayValue(admission['department_name']),
-      '责任医师': displayValue(admission['doctor_name']),
-      '预交金': displayValue(_context!['depositBalance']),
-      '可用余额': displayValue(_context!['availableBalance']),
-    };
+    final allergyNames = allergies
+        .map((item) => _contextValue(item['allergen_name']))
+        .where((name) => name != '--')
+        .join('、');
+    final facts = <(String, String)>[
+      ('联系方式', _contextValue(admission['phone'])),
+      (
+        '身高/体重',
+        '${_measurement(admission['height_cm'], 'cm')} / '
+            '${_measurement(admission['weight_kg'], 'kg')}'
+      ),
+      ('患者编号', _contextValue(admission['patient_no'])),
+      ('住院号', _contextValue(admission['inpatient_no'])),
+      ('病案号', _contextValue(admission['medical_record_no'])),
+      ('床号', _contextValue(admission['bed_no'])),
+      ('住院天数', '${_contextValue(admission['stay_days'])} 天'),
+      ('护理等级', _nursingLevel(admission['nursing_level'])),
+      ('科室', _contextValue(admission['department_name'])),
+      ('责任医师', _contextValue(admission['doctor_name'])),
+      ('过敏史', allergyNames.isEmpty ? '未登记' : allergyNames),
+      ('入院时间', _contextDate(admission['admission_time'])),
+      ('预交金', _contextValue(_context!['depositBalance'])),
+      ('费别', _feeType(admission['fee_type'])),
+      ('医保类型', _contextValue(admission['insurance_type'])),
+      ('可用余额', _contextValue(_context!['availableBalance'])),
+    ];
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
@@ -274,33 +361,29 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
               ),
               const SizedBox(width: 8),
               Text(
-                '${admission['patient_name']}  ${_gender(admission['gender'])}  ${_age(admission['birth_date'])}岁',
+                '${_contextValue(admission['patient_name'])}  '
+                '${_gender(admission['gender'])}  '
+                '${_age(admission['birth_date'])}',
                 style: Theme.of(context).textTheme.titleMedium,
               ),
             ],
           ),
-          ...facts.entries.map(
+          ...facts.map(
             (entry) => RichText(
               text: TextSpan(
                 style:
                     const TextStyle(color: WorkstationColors.ink, fontSize: 13),
                 children: [
                   TextSpan(
-                      text: '${entry.key}: ',
+                      text: '${entry.$1}: ',
                       style: const TextStyle(color: WorkstationColors.muted)),
                   TextSpan(
-                      text: entry.value,
+                      text: entry.$2,
                       style: const TextStyle(fontWeight: FontWeight.w700)),
                 ],
               ),
             ),
           ),
-          if (allergies.isNotEmpty)
-            Text(
-              '过敏史: ${allergies.map((item) => item['allergen_name']).join('、')}',
-              style: const TextStyle(
-                  color: Color(0xFFC22E2E), fontWeight: FontWeight.w700),
-            ),
         ],
       ),
     );
@@ -310,15 +393,53 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
       ? '男'
       : value == 'FEMALE'
           ? '女'
-          : '-';
+          : '--';
 
   String _age(dynamic birthday) {
-    if (birthday == null) {
-      return '-';
+    final date = DateTime.tryParse(birthday?.toString() ?? '');
+    if (date == null) {
+      return '--';
     }
-    final year = int.tryParse(birthday.toString().substring(0, 4));
-    return year == null ? '-' : '${DateTime.now().year - year}';
+    final now = DateTime.now();
+    var age = now.year - date.year;
+    if (now.month < date.month ||
+        (now.month == date.month && now.day < date.day)) {
+      age--;
+    }
+    return '$age岁';
   }
+
+  String _contextValue(dynamic value) {
+    final text = value?.toString().trim() ?? '';
+    return text.isEmpty ? '--' : text;
+  }
+
+  String _measurement(dynamic value, String unit) {
+    final text = _contextValue(value);
+    return text == '--' ? text : '$text$unit';
+  }
+
+  String _contextDate(dynamic value) {
+    final text = _contextValue(value);
+    if (text == '--') {
+      return text;
+    }
+    final normalized = text.replaceFirst('T', ' ');
+    return normalized.length > 16 ? normalized.substring(0, 16) : normalized;
+  }
+
+  String _nursingLevel(dynamic value) => switch (value) {
+        'LEVEL_1' => '一级护理',
+        'LEVEL_2' => '二级护理',
+        'LEVEL_3' => '三级护理',
+        _ => _contextValue(value),
+      };
+
+  String _feeType(dynamic value) => switch (value) {
+        'SELF_PAY' => '自费',
+        'INSURED' => '医保',
+        _ => _contextValue(value),
+      };
 
   Widget _clinicalSidebar() {
     return Container(
@@ -331,7 +452,21 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
               (group) => _MenuGroup(
                 group: group,
                 selected: _selectedMenu,
-                onSelected: (value) => setState(() => _selectedMenu = value),
+                onSelected: (value) {
+                  if (value == 'exam_records') {
+                    _openExamPanel();
+                  } else {
+                    setState(() {
+                      if (value == 'vitals') {
+                        _labPanelOpen = false;
+                        _orderPanelOpen = false;
+                        _examPanelOpen = false;
+                      }
+                      _nursingPanelOpen = false;
+                      _selectedMenu = value;
+                    });
+                  }
+                },
               ),
             )
             .toList(),
@@ -344,7 +479,7 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
     const items = [
       ('检验', Icons.science_outlined, 'lab_records'),
       ('检查', Icons.image_search_outlined, 'exam_records'),
-      ('护理', Icons.health_and_safety_outlined, 'nursing_records'),
+      ('护理', Icons.health_and_safety_outlined, 'vitals'),
       ('医嘱', Icons.medication_outlined, 'orders'),
       ('诊断引用', Icons.link_outlined, 'diagnosis_reference'),
       ('临床仪表', Icons.dashboard_outlined, 'dashboard'),
@@ -370,8 +505,20 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
               onTap: () {
                 if (item.$3 == 'lab_records') {
                   _openLabPanel();
+                } else if (item.$3 == 'exam_records') {
+                  _openExamPanel();
+                } else if (item.$3 == 'orders') {
+                  _openOrderPanel();
+                } else if (item.$3 == 'vitals') {
+                  _openNursingPanel();
                 } else {
-                  setState(() => _selectedMenu = item.$3);
+                  setState(() {
+                    _labPanelOpen = false;
+                    _orderPanelOpen = false;
+                    _examPanelOpen = false;
+                    _nursingPanelOpen = false;
+                    _selectedMenu = item.$3;
+                  });
                 }
               },
               child: Container(
@@ -379,6 +526,9 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
                 padding: const EdgeInsets.symmetric(vertical: 13),
                 decoration: BoxDecoration(
                   color: (item.$3 == 'lab_records' && _labPanelOpen) ||
+                          (item.$3 == 'exam_records' && _examPanelOpen) ||
+                          (item.$3 == 'orders' && _orderPanelOpen) ||
+                          (item.$3 == 'vitals' && _nursingPanelOpen) ||
                           _selectedMenu == item.$3
                       ? const Color(0xFFE3F3F8)
                       : Colors.white,
@@ -403,6 +553,9 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
 
   void _openLabPanel() {
     setState(() {
+      _orderPanelOpen = false;
+      _examPanelOpen = false;
+      _nursingPanelOpen = false;
       _labPanelOpen = true;
       _labReportsFuture = ref
           .read(apiClientProvider)
@@ -412,6 +565,278 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
 
   void _closeLabPanel() {
     setState(() => _labPanelOpen = false);
+  }
+
+  void _openOrderPanel() {
+    setState(() {
+      _labPanelOpen = false;
+      _examPanelOpen = false;
+      _nursingPanelOpen = false;
+      _orderPanelOpen = true;
+      _orderPanelFuture = _loadOrderPanel();
+    });
+  }
+
+  void _closeOrderPanel() {
+    setState(() => _orderPanelOpen = false);
+  }
+
+  void _openExamPanel() {
+    setState(() {
+      _labPanelOpen = false;
+      _orderPanelOpen = false;
+      _nursingPanelOpen = false;
+      _examPanelOpen = true;
+    });
+  }
+
+  void _closeExamPanel() {
+    setState(() => _examPanelOpen = false);
+  }
+
+  void _openNursingPanel() {
+    setState(() {
+      _labPanelOpen = false;
+      _examPanelOpen = false;
+      _orderPanelOpen = false;
+      _nursingPanelSection = 'vitals';
+      _nursingPanelMounted = true;
+      _nursingPanelOpen = true;
+    });
+  }
+
+  void _closeNursingPanel() {
+    setState(() => _nursingPanelOpen = false);
+  }
+
+  void _resizeExamPanel(double delta, double maximum) {
+    final current = _examPanelWidth ?? maximum * 0.5;
+    final next = (current - delta).clamp(360.0, maximum - 120.0).toDouble();
+    setState(() => _examPanelWidth = next);
+  }
+
+  Widget _examPanel(double width, double maximum) {
+    return Material(
+      elevation: 12,
+      color: Colors.white,
+      child: Stack(
+        children: [
+          Positioned.fill(
+            child: Container(
+              decoration: const BoxDecoration(
+                border: Border(
+                  left: BorderSide(color: WorkstationColors.border, width: 2),
+                ),
+              ),
+              child: ExamReportPanel(
+                key: ValueKey('exam-panel-$_admissionId'),
+                admissionId: _admissionId!,
+                role: widget.role,
+                onClose: _closeExamPanel,
+              ),
+            ),
+          ),
+          Positioned(
+            left: -5,
+            top: 0,
+            bottom: 0,
+            child: MouseRegion(
+              cursor: SystemMouseCursors.resizeLeftRight,
+              child: GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onHorizontalDragUpdate: (details) =>
+                    _resizeExamPanel(details.delta.dx, maximum),
+                child: const SizedBox(width: 10),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _nursingPanel() {
+    const items = [
+      ('nursing_records', '护理记录', Icons.edit_note_outlined),
+      ('vitals', '体征', Icons.monitor_heart_outlined),
+      ('nursing_assessment', '护理评估单', Icons.fact_check_outlined),
+      ('other_nursing', '其他护理文件', Icons.folder_copy_outlined),
+      ('critical_care', '重症特护单', Icons.health_and_safety_outlined),
+    ];
+    final selected = items.firstWhere(
+      (item) => item.$1 == _nursingPanelSection,
+      orElse: () => items[1],
+    );
+    return Material(
+      elevation: 14,
+      color: Colors.white,
+      child: DecoratedBox(
+        decoration: const BoxDecoration(
+          border: Border(
+            left: BorderSide(color: WorkstationColors.border, width: 2),
+          ),
+        ),
+        child: Column(
+          children: [
+            Container(
+              height: 52,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: const BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(color: WorkstationColors.border),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.health_and_safety_outlined,
+                    color: WorkstationColors.blue,
+                  ),
+                  const SizedBox(width: 8),
+                  Text('护理', style: Theme.of(context).textTheme.titleMedium),
+                  const Spacer(),
+                  IconButton(
+                    tooltip: '关闭护理抽屉',
+                    onPressed: _closeNursingPanel,
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+            ),
+            Expanded(
+              child: Row(
+                children: [
+                  Container(
+                    width: 176,
+                    color: const Color(0xFFF8FAFB),
+                    child: ListView(
+                      padding: const EdgeInsets.symmetric(vertical: 8),
+                      children: items
+                          .map(
+                            (item) => _nursingPanelItem(
+                              section: item.$1,
+                              label: item.$2,
+                              icon: item.$3,
+                              selected: item.$1 == _nursingPanelSection,
+                            ),
+                          )
+                          .toList(),
+                    ),
+                  ),
+                  const VerticalDivider(
+                    width: 1,
+                    thickness: 1,
+                    color: WorkstationColors.border,
+                  ),
+                  Expanded(
+                    child: _nursingPanelSection == 'vitals'
+                        ? _vitals()
+                        : _nursingPanelPlaceholder(
+                            label: selected.$2,
+                            icon: selected.$3,
+                          ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _nursingPanelItem({
+    required String section,
+    required String label,
+    required IconData icon,
+    required bool selected,
+  }) {
+    return Material(
+      color: selected ? const Color(0xFFE3F3F8) : Colors.transparent,
+      child: InkWell(
+        key: ValueKey('nursing-drawer-$section'),
+        onTap: () => setState(() => _nursingPanelSection = section),
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+          decoration: BoxDecoration(
+            border: Border(
+              left: BorderSide(
+                color: selected ? WorkstationColors.cyan : Colors.transparent,
+                width: 3,
+              ),
+              bottom: const BorderSide(color: WorkstationColors.border),
+            ),
+          ),
+          child: Row(
+            children: [
+              Icon(
+                icon,
+                color: selected ? WorkstationColors.blue : WorkstationColors.muted,
+                size: 19,
+              ),
+              const SizedBox(width: 9),
+              Expanded(
+                child: Text(
+                  label,
+                  style: TextStyle(
+                    color: selected ? WorkstationColors.blue : WorkstationColors.ink,
+                    fontWeight: selected ? FontWeight.w700 : FontWeight.w400,
+                  ),
+                ),
+              ),
+              if (section != 'vitals')
+                const Icon(
+                  Icons.lock_outline,
+                  size: 15,
+                  color: WorkstationColors.muted,
+                ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _nursingPanelPlaceholder({
+    required String label,
+    required IconData icon,
+  }) {
+    return Center(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 42, color: WorkstationColors.muted),
+          const SizedBox(height: 12),
+          Text(label, style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 4),
+          const Text(
+            '该功能入口已预留，暂未开放业务页面。',
+            style: TextStyle(color: WorkstationColors.muted),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _loadOrderPanel() {
+    final parameters = <String>[];
+    if (_orderPanelClass.isNotEmpty) {
+      parameters.add('orderClass=${Uri.encodeQueryComponent(_orderPanelClass)}');
+    }
+    if (_orderPanelStatus.isNotEmpty) {
+      parameters.add('status=${Uri.encodeQueryComponent(_orderPanelStatus)}');
+    }
+    final query = parameters.isEmpty ? '' : '?${parameters.join('&')}';
+    return ref.read(apiClientProvider).getList(
+        '/api/v1/workstation/admissions/${_admissionId!}/care-orders$query');
+  }
+
+  void _reloadOrderPanel() {
+    if (!_orderPanelOpen) {
+      return;
+    }
+    setState(() => _orderPanelFuture = _loadOrderPanel());
   }
 
   void _resizeLabPanel(double delta, double maximum) {
@@ -923,6 +1348,372 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
     );
   }
 
+  Widget _orderPanel() {
+    return Material(
+      elevation: 14,
+      color: Colors.white,
+      child: DecoratedBox(
+        decoration: const BoxDecoration(
+          border: Border(
+            left: BorderSide(color: WorkstationColors.border, width: 2),
+          ),
+        ),
+        child: Column(
+          children: [
+            Container(
+              height: 52,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: const BoxDecoration(
+                border: Border(
+                  bottom: BorderSide(color: WorkstationColors.border),
+                ),
+              ),
+              child: Row(
+                children: [
+                  const Icon(
+                    Icons.medication_outlined,
+                    color: WorkstationColors.blue,
+                  ),
+                  const SizedBox(width: 8),
+                  Text('住院医嘱', style: Theme.of(context).textTheme.titleMedium),
+                  const Spacer(),
+                  if (_isDoctor)
+                    IconButton(
+                      onPressed: () =>
+                          _createCareOrder(onSuccess: _reloadOrderPanel),
+                      tooltip: '新增医嘱',
+                      icon: const Icon(Icons.add_circle_outline),
+                    ),
+                  IconButton(
+                    onPressed: _reloadOrderPanel,
+                    tooltip: '刷新医嘱',
+                    icon: const Icon(Icons.refresh),
+                  ),
+                  IconButton(
+                    onPressed: _closeOrderPanel,
+                    tooltip: '关闭医嘱面板',
+                    icon: const Icon(Icons.close),
+                  ),
+                ],
+              ),
+            ),
+            _orderPanelFilters(),
+            Expanded(child: _orderPanelTable()),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _orderPanelFilters() {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: const BoxDecoration(
+        color: Color(0xFFF9FBFC),
+        border: Border(bottom: BorderSide(color: WorkstationColors.border)),
+      ),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        crossAxisAlignment: WrapCrossAlignment.center,
+        children: [
+          _orderDateFilterButton('开立日期起', _orderPanelStartDate, true),
+          _orderDateFilterButton('开立日期止', _orderPanelEndDate, false),
+          SizedBox(
+            width: 200,
+            height: 38,
+            child: TextField(
+              controller: _orderPanelKeywordController,
+              decoration: const InputDecoration(
+                isDense: true,
+                labelText: '医嘱内容',
+                prefixIcon: Icon(Icons.search, size: 18),
+              ),
+              onChanged: (value) {
+                setState(() => _orderPanelKeyword = value.trim());
+              },
+            ),
+          ),
+          _orderFilterDropdown(
+            label: '医嘱类别',
+            value: _orderPanelClass,
+            options: const {
+              '': '全部类别',
+              'LONG_TERM': '长期医嘱',
+              'TEMPORARY': '临时医嘱',
+            },
+            onChanged: (value) {
+              setState(() => _orderPanelClass = value ?? '');
+              _reloadOrderPanel();
+            },
+          ),
+          _orderFilterDropdown(
+            label: '医嘱状态',
+            value: _orderPanelStatus,
+            options: const {
+              '': '全部状态',
+              'OPEN': '执行中',
+              'STOPPED': '已停止',
+              'CANCELLED': '已取消',
+            },
+            onChanged: (value) {
+              setState(() => _orderPanelStatus = value ?? '');
+              _reloadOrderPanel();
+            },
+          ),
+          IconButton(
+            onPressed: _resetOrderPanelFilters,
+            tooltip: '清空筛选条件',
+            icon: const Icon(Icons.filter_alt_off_outlined),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _orderDateFilterButton(String label, DateTime? value, bool isStart) {
+    return OutlinedButton.icon(
+      onPressed: () => _pickOrderDate(isStart),
+      style: OutlinedButton.styleFrom(
+        minimumSize: const Size(0, 38),
+        visualDensity: VisualDensity.compact,
+      ),
+      icon: const Icon(Icons.calendar_month_outlined, size: 17),
+      label: Text(value == null ? label : _dateText(value)),
+    );
+  }
+
+  Widget _orderFilterDropdown({
+    required String label,
+    required String value,
+    required Map<String, String> options,
+    required ValueChanged<String?> onChanged,
+  }) {
+    return SizedBox(
+      width: 152,
+      child: DropdownButtonFormField<String>(
+        key: ValueKey('$label-$value'),
+        initialValue: value,
+        isDense: true,
+        decoration: InputDecoration(labelText: label),
+        items: options.entries
+            .map(
+              (option) => DropdownMenuItem(
+                value: option.key,
+                child: Text(option.value),
+              ),
+            )
+            .toList(),
+        onChanged: onChanged,
+      ),
+    );
+  }
+
+  Future<void> _pickOrderDate(bool isStart) async {
+    final current = isStart ? _orderPanelStartDate : _orderPanelEndDate;
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: current ??
+          (isStart ? _orderPanelEndDate : _orderPanelStartDate) ??
+          DateTime.now(),
+      firstDate: DateTime(2020),
+      lastDate: DateTime(2035),
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+    setState(() {
+      if (isStart) {
+        _orderPanelStartDate = picked;
+        if (_orderPanelEndDate != null && picked.isAfter(_orderPanelEndDate!)) {
+          _orderPanelEndDate = picked;
+        }
+      } else {
+        _orderPanelEndDate = picked;
+        if (_orderPanelStartDate != null &&
+            picked.isBefore(_orderPanelStartDate!)) {
+          _orderPanelStartDate = picked;
+        }
+      }
+    });
+  }
+
+  void _resetOrderPanelFilters() {
+    setState(() {
+      _orderPanelClass = '';
+      _orderPanelStatus = '';
+      _orderPanelKeyword = '';
+      _orderPanelStartDate = null;
+      _orderPanelEndDate = null;
+      _orderPanelFuture = _loadOrderPanel();
+    });
+    _orderPanelKeywordController.clear();
+  }
+
+  Widget _orderPanelTable() {
+    return FutureBuilder<List<Map<String, dynamic>>>(
+      future: _orderPanelFuture,
+      builder: (context, snapshot) {
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const Center(child: CircularProgressIndicator());
+        }
+        if (snapshot.hasError) {
+          return Center(child: Text(apiErrorMessage(snapshot.error!)));
+        }
+        final rows = (snapshot.data ?? const <Map<String, dynamic>>[])
+            .where(_matchesOrderPanelFilters)
+            .toList();
+        if (rows.isEmpty) {
+          return const Center(
+            child: Text(
+              '暂无符合条件的医嘱。',
+              style: TextStyle(color: WorkstationColors.muted),
+            ),
+          );
+        }
+        return SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(minWidth: 1570),
+            child: SingleChildScrollView(
+              child: DataTable(
+                headingRowColor:
+                    const WidgetStatePropertyAll(WorkstationColors.heading),
+                columnSpacing: 18,
+                horizontalMargin: 16,
+                columns: const [
+                  DataColumn(label: Text('开立时间')),
+                  DataColumn(label: Text('医嘱号')),
+                  DataColumn(label: Text('类型')),
+                  DataColumn(label: Text('长期/临时')),
+                  DataColumn(label: Text('医嘱内容')),
+                  DataColumn(label: Text('剂量')),
+                  DataColumn(label: Text('途径')),
+                  DataColumn(label: Text('频次')),
+                  DataColumn(label: Text('开始时间')),
+                  DataColumn(label: Text('结束时间')),
+                  DataColumn(label: Text('开立医师')),
+                  DataColumn(label: Text('状态')),
+                  DataColumn(label: Text('操作')),
+                ],
+                rows: rows
+                    .map(
+                      (row) => DataRow(
+                        cells: [
+                          DataCell(Text(_formatOrderDate(row['created_at']))),
+                          DataCell(Text(displayValue(row['order_no']))),
+                          DataCell(Text(_orderTypeLabel(row['order_type']))),
+                          DataCell(Text(_orderClassLabel(row['order_class']))),
+                          DataCell(
+                            SizedBox(
+                              width: 220,
+                              child: Text(
+                                displayValue(row['order_name']),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                          ),
+                          DataCell(Text(displayValue(row['dose']))),
+                          DataCell(Text(displayValue(row['route']))),
+                          DataCell(Text(displayValue(row['frequency']))),
+                          DataCell(Text(_formatOrderDate(row['start_time']))),
+                          DataCell(Text(_formatOrderDate(
+                              row['end_time'] ?? row['stopped_at']))),
+                          DataCell(Text(displayValue(row['doctor_name']))),
+                          DataCell(_orderPanelStatusText(row['status'])),
+                          DataCell(
+                            _careOrderActions(
+                              row,
+                              onSuccess: _reloadOrderPanel,
+                            ),
+                          ),
+                        ],
+                      ),
+                    )
+                    .toList(),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  bool _matchesOrderPanelFilters(Map<String, dynamic> row) {
+    final keyword = _orderPanelKeyword.toLowerCase();
+    final searchable =
+        '${row['order_name'] ?? ''} ${row['order_no'] ?? ''}'.toLowerCase();
+    if (keyword.isNotEmpty && !searchable.contains(keyword)) {
+      return false;
+    }
+    if (_orderPanelStartDate == null && _orderPanelEndDate == null) {
+      return true;
+    }
+    final createdAt = _orderDate(row['created_at']);
+    if (createdAt == null) {
+      return false;
+    }
+    final day = DateUtils.dateOnly(createdAt);
+    if (_orderPanelStartDate != null &&
+        day.isBefore(DateUtils.dateOnly(_orderPanelStartDate!))) {
+      return false;
+    }
+    if (_orderPanelEndDate != null &&
+        day.isAfter(DateUtils.dateOnly(_orderPanelEndDate!))) {
+      return false;
+    }
+    return true;
+  }
+
+  DateTime? _orderDate(dynamic value) {
+    if (value == null) {
+      return null;
+    }
+    return DateTime.tryParse(value.toString().replaceFirst(' ', 'T'));
+  }
+
+  String _formatOrderDate(dynamic value) {
+    final text = displayValue(value);
+    if (text == '-') {
+      return text;
+    }
+    final formatted = text.replaceFirst('T', ' ');
+    return formatted.length > 16 ? formatted.substring(0, 16) : formatted;
+  }
+
+  String _orderTypeLabel(dynamic value) => switch (value) {
+        'TREATMENT' => '治疗医嘱',
+        'NURSING' => '护理医嘱',
+        _ => displayValue(value),
+      };
+
+  String _orderClassLabel(dynamic value) => switch (value) {
+        'LONG_TERM' => '长期医嘱',
+        'TEMPORARY' => '临时医嘱',
+        _ => displayValue(value),
+      };
+
+  Widget _orderPanelStatusText(dynamic value) {
+    final status = displayValue(value);
+    final label = switch (status) {
+      'OPEN' => '执行中',
+      'STOPPED' => '已停止',
+      'CANCELLED' => '已取消',
+      _ => status,
+    };
+    final color = switch (status) {
+      'OPEN' => Colors.orange.shade800,
+      'CANCELLED' => Colors.red.shade700,
+      'STOPPED' => WorkstationColors.muted,
+      _ => WorkstationColors.ink,
+    };
+    return Text(
+      label,
+      style: TextStyle(color: color, fontWeight: FontWeight.w700),
+    );
+  }
+
   Widget _mobileMenu() {
     final items = _menuGroups().expand((group) => group.items).toList();
     return Container(
@@ -1012,14 +1803,20 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
         child: switch (_selectedMenu) {
           'dashboard' => _dashboard(),
           'quality' => _quality(),
-          'documents' || 'record_home' => _selectedMenu == 'record_home'
-              ? CaseHomePage(
-                  admissionId: _admissionId!,
-                  role: widget.role,
-                  onSaved: _refreshPage,
-                )
-              : _documents(recordHome: false),
-          'inpatient_record' ||
+          'documents' => CourseRecordPage(
+              admissionId: _admissionId!,
+              role: widget.role,
+            ),
+          'record_home' => CaseHomePage(
+              admissionId: _admissionId!,
+              role: widget.role,
+              onSaved: _refreshPage,
+            ),
+          'inpatient_record' => AdmissionRecordPage(
+              admissionId: _admissionId!,
+              role: widget.role,
+              onChanged: _refreshPage,
+            ),
           'consultation_records' ||
           'discharge_record' ||
           'surgery_anesthesia' ||
@@ -1035,13 +1832,23 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
             _orders(instructionOnly: _selectedMenu == 'instructions'),
           'pathway' => _pathway(),
           'print' => _exports(),
-          'disease_reports' => _diseaseReports(),
+          'disease_reports' => DiseaseReportHistoryPage(
+              key: ValueKey('disease-report-history-$_admissionId'),
+              admissionId: _admissionId!,
+              role: widget.role,
+              patientContext: _context ?? const {},
+              onChanged: _refreshPage,
+            ),
           'surgery' => _surgery(),
           'consultations' => _consultations(),
           'reports' => _reports(),
-          'lab_records' ||
-          'exam_records' ||
-          'nursing_records' =>
+          'exam_records' => ExamReportPanel(
+              key: ValueKey('mobile-exam-panel-$_admissionId'),
+              admissionId: _admissionId!,
+              role: widget.role,
+              onClose: () => setState(() => _selectedMenu = 'record_home'),
+            ),
+          'lab_records' || 'nursing_records' =>
             _selectedMenu == 'nursing_records'
                 ? _nursingRecords()
                 : _placeholderModule(_menuLabel(_selectedMenu)),
@@ -1057,7 +1864,9 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
           'allergy_entry' ||
           'allergy_history' =>
             _allergies(entry: _selectedMenu == 'allergy_entry'),
-          'diagnosis_reference' ||
+          'diagnosis_reference' => DiagnosisReferencePage(
+              admissionId: _admissionId!,
+            ),
           'writing_assistant' =>
             _placeholderModule(_menuLabel(_selectedMenu)),
           _ => const SizedBox.shrink(),
@@ -1341,82 +2150,18 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
   }
 
   Widget _orders({required bool instructionOnly}) {
-    final admissionId = _admissionId!;
-    return WorkSurface(
-      padding: EdgeInsets.zero,
-      child: Column(
-        children: [
-          WorkspaceToolbar(
-            title: instructionOnly ? '医嘱说明录入' : '住院医嘱',
-            subtitle: instructionOnly
-                ? '查看和维护治疗、护理医嘱的说明信息。'
-                : '长期、临时、治疗和护理医嘱的开立、停止与执行。',
-            actions: [
-              if (_isDoctor)
-                IconButton(
-                  onPressed: _createCareOrder,
-                  tooltip: '新增医嘱',
-                  icon: const Icon(Icons.add_circle_outline),
-                ),
-              IconButton(
-                  onPressed: _refreshPage,
-                  tooltip: '刷新',
-                  icon: const Icon(Icons.refresh)),
-            ],
-          ),
-          Expanded(
-            child: FutureBuilder<List<Map<String, dynamic>>>(
-              future: ref.read(apiClientProvider).getList(
-                  '/api/v1/workstation/admissions/$admissionId/care-orders'),
-              builder: (context, snapshot) {
-                if (snapshot.connectionState != ConnectionState.done) {
-                  return const Center(child: CircularProgressIndicator());
-                }
-                final rows = snapshot.data ?? [];
-                if (rows.isEmpty) {
-                  return const Center(child: Text('暂无治疗或护理医嘱。'));
-                }
-                return SingleChildScrollView(
-                  child: DataTable(
-                    headingRowColor:
-                        const WidgetStatePropertyAll(WorkstationColors.heading),
-                    columns: const [
-                      DataColumn(label: Text('医嘱号')),
-                      DataColumn(label: Text('类型')),
-                      DataColumn(label: Text('长期/临时')),
-                      DataColumn(label: Text('医嘱内容')),
-                      DataColumn(label: Text('剂量/途径/频次')),
-                      DataColumn(label: Text('状态')),
-                      DataColumn(label: Text('操作')),
-                    ],
-                    rows: rows
-                        .map(
-                          (row) => DataRow(cells: [
-                            DataCell(Text(displayValue(row['order_no']))),
-                            DataCell(Text(displayValue(row['order_type']))),
-                            DataCell(Text(displayValue(row['order_class']))),
-                            DataCell(SizedBox(
-                                width: 180,
-                                child: Text(displayValue(row['order_name']),
-                                    overflow: TextOverflow.ellipsis))),
-                            DataCell(Text(
-                                '${displayValue(row['dose'])} ${displayValue(row['route'])} ${displayValue(row['frequency'])}')),
-                            DataCell(_statusText(row['status'])),
-                            DataCell(_careOrderActions(row)),
-                          ]),
-                        )
-                        .toList(),
-                  ),
-                );
-              },
-            ),
-          ),
-        ],
-      ),
+    return InpatientOrderPage(
+      key: ValueKey('inpatient-orders-${_admissionId!}-$instructionOnly'),
+      admissionId: _admissionId!,
+      role: widget.role,
+      instructionOnly: instructionOnly,
     );
   }
 
-  Widget _careOrderActions(Map<String, dynamic> row) {
+  Widget _careOrderActions(
+    Map<String, dynamic> row, {
+    VoidCallback? onSuccess,
+  }) {
     final id = _id(row['care_order_id']);
     if (row['status'] != 'OPEN') {
       return const Text('-');
@@ -1430,20 +2175,27 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
             icon: const Icon(Icons.task_alt_outlined, size: 20),
             onPressed: () => _post(
                 '/api/v1/workstation/care-orders/$id/execute',
-                {'resultNote': '已按医嘱执行'}),
+                {'resultNote': '已按医嘱执行'},
+                onSuccess: onSuccess),
           ),
         if (_isDoctor) ...[
           IconButton(
             tooltip: '停止医嘱',
             icon: const Icon(Icons.stop_circle_outlined, size: 20),
-            onPressed: () =>
-                _reasonPost('/api/v1/workstation/care-orders/$id/stop', '停止医嘱'),
+            onPressed: () => _reasonPost(
+              '/api/v1/workstation/care-orders/$id/stop',
+              '停止医嘱',
+              onSuccess: onSuccess,
+            ),
           ),
           IconButton(
             tooltip: '取消医嘱',
             icon: const Icon(Icons.cancel_outlined, size: 20),
             onPressed: () => _reasonPost(
-                '/api/v1/workstation/care-orders/$id/cancel', '取消医嘱'),
+              '/api/v1/workstation/care-orders/$id/cancel',
+              '取消医嘱',
+              onSuccess: onSuccess,
+            ),
           ),
         ],
       ],
@@ -1494,54 +2246,6 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
             onPressed: _requestExport,
             tooltip: '创建导出任务',
             icon: const Icon(Icons.picture_as_pdf_outlined)),
-      ],
-    );
-  }
-
-  Widget _diseaseReports() {
-    final admissionId = _admissionId!;
-    return _futureTable(
-      title: '疾病上报史',
-      subtitle: '本地演示草稿、提交、管理员审核和退回流程，不连接真实公共卫生平台。',
-      future: ref.read(apiClientProvider).getList(
-          '/api/v1/workstation/admissions/$admissionId/disease-reports'),
-      columns: const [
-        'report_type',
-        'disease_name',
-        'status',
-        'reporter_name',
-        'review_note'
-      ],
-      actions: [
-        if (_isDoctor)
-          IconButton(
-              onPressed: _createDiseaseReport,
-              tooltip: '新增疾病上报',
-              icon: const Icon(Icons.add_circle_outline)),
-      ],
-      rowAction: (row) => _diseaseReportActions(row),
-    );
-  }
-
-  Widget _diseaseReportActions(Map<String, dynamic> row) {
-    final id = _id(row['disease_report_id']);
-    return Wrap(
-      spacing: 2,
-      children: [
-        if (_isDoctor &&
-            (row['status'] == 'DRAFT' || row['status'] == 'RETURNED'))
-          IconButton(
-            tooltip: '提交审核',
-            icon: const Icon(Icons.send_outlined, size: 20),
-            onPressed: () =>
-                _post('/api/v1/workstation/disease-reports/$id/submit', {}),
-          ),
-        if (widget.role == 'SUPER_ADMIN' && row['status'] == 'SUBMITTED')
-          IconButton(
-            tooltip: '审核',
-            icon: const Icon(Icons.fact_check_outlined, size: 20),
-            onPressed: () => _reviewDiseaseReport(id),
-          ),
       ],
     );
   }
@@ -1677,33 +2381,13 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
   }
 
   Widget _vitals() {
-    return _futureTable(
-      title: '生命体征 / 体温单',
-      subtitle: '按测量时间排列的体温、脉搏、血压、血氧、疼痛和出入量时间序列。',
-      future: ref.read(apiClientProvider).getList(
-          '/api/v1/workstation/admissions/${_admissionId!}/temperature-chart'),
-      columns: const [
-        'measured_at',
-        'temperature',
-        'pulse',
-        'systolic_bp',
-        'diastolic_bp',
-        'spo2',
-        'pain_score',
-        'intake_ml',
-        'output_ml'
-      ],
-      actions: [
-        if (_isNurse)
-          IconButton(
-              onPressed: _createVitalSign,
-              tooltip: '录入生命体征',
-              icon: const Icon(Icons.add_circle_outline)),
-        IconButton(
-            onPressed: _requestExport,
-            tooltip: '导出体温单',
-            icon: const Icon(Icons.print_outlined)),
-      ],
+    final admission = _context?['admission'];
+    final values = admission is Map ? Map<String, dynamic>.from(admission) : const <String, dynamic>{};
+    return VitalSignsPage(
+      admissionId: _admissionId!,
+      role: widget.role,
+      patientHeightCm: _numberValue(values['height_cm']),
+      patientWeightKg: _numberValue(values['weight_kg']),
     );
   }
 
@@ -2032,7 +2716,7 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
     }
   }
 
-  Future<void> _createCareOrder() async {
+  Future<void> _createCareOrder({VoidCallback? onSuccess}) async {
     final values = await showTextFormDialog(
       context,
       title: '新增治疗/护理医嘱',
@@ -2050,7 +2734,7 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
     );
     if (values != null) {
       await _post('/api/v1/workstation/admissions/${_admissionId!}/care-orders',
-          values);
+          values, onSuccess: onSuccess);
     }
   }
 
@@ -2119,38 +2803,6 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
     if (values != null) {
       await _post(
           '/api/v1/workstation/admissions/${_admissionId!}/exports', values);
-    }
-  }
-
-  Future<void> _createDiseaseReport() async {
-    final values = await showTextFormDialog(
-      context,
-      title: '新增疾病上报',
-      fields: const [
-        FieldSpec('reportType', '上报类型编码',
-            required: true, initialValue: 'INFECTIOUS'),
-        FieldSpec('diseaseName', '疾病名称', required: true),
-        FieldSpec('content', '上报内容', required: true, multiline: true),
-      ],
-    );
-    if (values != null) {
-      await _post(
-          '/api/v1/workstation/admissions/${_admissionId!}/disease-reports',
-          values);
-    }
-  }
-
-  Future<void> _reviewDiseaseReport(int reportId) async {
-    final values = await showTextFormDialog(
-      context,
-      title: '审核疾病上报',
-      fields: const [FieldSpec('note', '审核意见', multiline: true)],
-      submitLabel: '通过',
-    );
-    if (values != null) {
-      values['approved'] = true;
-      await _post(
-          '/api/v1/workstation/disease-reports/$reportId/review', values);
     }
   }
 
@@ -2233,30 +2885,6 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
     }
   }
 
-  Future<void> _createVitalSign() async {
-    final values = await showTextFormDialog(
-      context,
-      title: '录入生命体征',
-      fields: const [
-        FieldSpec('temperature', '体温', numeric: true, decimal: true),
-        FieldSpec('pulse', '脉搏', numeric: true),
-        FieldSpec('respiratoryRate', '呼吸频率', numeric: true),
-        FieldSpec('systolicBp', '收缩压', numeric: true),
-        FieldSpec('diastolicBp', '舒张压', numeric: true),
-        FieldSpec('spo2', '血氧饱和度', numeric: true, decimal: true),
-        FieldSpec('painScore', '疼痛评分', numeric: true),
-        FieldSpec('consciousness', '意识状态', initialValue: '清醒'),
-        FieldSpec('intakeMl', '入量（ml）', numeric: true, decimal: true),
-        FieldSpec('outputMl', '出量（ml）', numeric: true, decimal: true),
-        FieldSpec('remark', '备注'),
-      ],
-    );
-    if (values != null) {
-      await _post('/api/v1/workstation/admissions/${_admissionId!}/vital-signs',
-          values);
-    }
-  }
-
   Future<void> _createDiagnosis() async {
     final values = await showTextFormDialog(
       context,
@@ -2295,7 +2923,11 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
     }
   }
 
-  Future<void> _reasonPost(String path, String title) async {
+  Future<void> _reasonPost(
+    String path,
+    String title, {
+    VoidCallback? onSuccess,
+  }) async {
     final values = await showTextFormDialog(
       context,
       title: title,
@@ -2305,15 +2937,20 @@ class _ClinicalWorkstationState extends ConsumerState<ClinicalWorkstation> {
       submitLabel: '确认',
     );
     if (values != null) {
-      await _post(path, values);
+      await _post(path, values, onSuccess: onSuccess);
     }
   }
 
-  Future<void> _post(String path, Map<String, dynamic> data) async {
+  Future<void> _post(
+    String path,
+    Map<String, dynamic> data, {
+    VoidCallback? onSuccess,
+  }) async {
     try {
       await ref.read(apiClientProvider).postVoid(path, data);
       if (mounted) {
         showOperationMessage(context, '操作已完成。');
+        onSuccess?.call();
         _refreshPage();
       }
     } catch (error) {
